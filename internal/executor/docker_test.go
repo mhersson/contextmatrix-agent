@@ -1129,3 +1129,7 @@ func TestLaunchRemovesACreateCutShort(t *testing.T) {
 		})
 	}
 }
+
+func TestContainerNameForACardlessKey(t *testing.T) {
+	assert.Equal(t, "cm-agent-alpha-guidance_pr", containerName(RunKey{Project: "alpha", Kind: "guidance_pr"}))
+}

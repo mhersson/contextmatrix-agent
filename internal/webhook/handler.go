@@ -222,7 +222,7 @@ type Config struct {
 	// unmounted, as on an agent without run kinds.
 	RunInputs RunInputStore
 
-	// Sections supplies the stopped run's log section an investigate run reads.
+	// Sections supplies the stopped run's log section an investigate or analyse run reads.
 	Sections SectionSource
 
 	// Images lists the node's tagged images for GET /images. Nil disables the

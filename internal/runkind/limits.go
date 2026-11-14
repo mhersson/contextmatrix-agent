@@ -41,6 +41,16 @@ func limitResult(r protocol.RunKindResult) protocol.RunKindResult {
 		r.Investigate = &i
 	}
 
+	if r.Analyse != nil {
+		a := limitAnalyse(*r.Analyse)
+		r.Analyse = &a
+	}
+
+	if r.GuidancePR != nil {
+		g := limitGuidance(*r.GuidancePR)
+		r.GuidancePR = &g
+	}
+
 	return r
 }
 
@@ -62,19 +72,29 @@ func limitCheck(r protocol.CheckResult) protocol.CheckResult {
 
 	r.Candidates = cands
 
-	if len(r.AbsentFromRepo) > maxAbsent {
-		r.AbsentFromRepo = r.AbsentFromRepo[:maxAbsent]
-	}
-
-	r.AbsentFromRepo = mapStrings(r.AbsentFromRepo, func(s string) string { return truncate(s, maxAbsentBytes) })
+	r.AbsentFromRepo = limitAbsent(r.AbsentFromRepo)
 
 	return r
 }
 
-// limitInvestigate truncates the diagnosis and each finding's evidence, drops a
-// fix whose section or retired IDs are over their limits, drops forward_to
-// when over its limit, and drops each finding whose title or text is over its
-// limit before it keeps the first 50.
+// limitGuidance bounds the absent entries as limitCheck does.
+func limitGuidance(r protocol.GuidancePRResult) protocol.GuidancePRResult {
+	r.AbsentFromRepo = limitAbsent(r.AbsentFromRepo)
+
+	return r
+}
+
+func limitAbsent(absent []string) []string {
+	if len(absent) > maxAbsent {
+		absent = absent[:maxAbsent]
+	}
+
+	return mapStrings(absent, func(s string) string { return truncate(s, maxAbsentBytes) })
+}
+
+// limitInvestigate truncates the diagnosis, drops a fix whose section or
+// retired IDs are over their limits, drops forward_to when over its limit and
+// bounds the findings.
 func limitInvestigate(r protocol.InvestigateResult) protocol.InvestigateResult {
 	r.Diagnosis = truncate(r.Diagnosis, maxDiagnosisBytes)
 
@@ -86,49 +106,53 @@ func limitInvestigate(r protocol.InvestigateResult) protocol.InvestigateResult {
 		r.ForwardTo = nil
 	}
 
-	if r.Findings == nil {
-		return r
-	}
-
-	findings := make([]protocol.FrictionFinding, 0, min(len(r.Findings), maxFindings))
-
-	for _, f := range r.Findings {
-		if len(findings) == maxFindings {
-			break
-		}
-
-		if len(f.Title) > maxTitleBytes || len(f.Text) > maxTextBytes {
-			continue
-		}
-
-		f.Evidence = truncate(f.Evidence, maxEvidenceBytes)
-		findings = append(findings, f)
-	}
-
-	r.Findings = findings
+	r.Findings = limitFindings(r.Findings)
 
 	return r
 }
 
-// fitOutcome drops an investigation's last finding until d encodes to at most
-// maxBytes, so the diagnosis and the fix always survive. Nothing else changes.
+// limitAnalyse bounds the findings; nil becomes empty.
+func limitAnalyse(r protocol.AnalyseResult) protocol.AnalyseResult {
+	r.Findings = limitFindings(r.Findings)
+	if r.Findings == nil {
+		r.Findings = []protocol.FrictionFinding{}
+	}
+
+	return r
+}
+
+// fitOutcome drops the last finding of an investigation or an analysis until d
+// encodes to at most maxBytes, so the rest of the result always survives.
 func fitOutcome(d runoutcome.Data, maxBytes int) runoutcome.Data {
-	if d.Result == nil || d.Result.Investigate == nil {
+	if d.Result == nil {
 		return d
 	}
 
 	res := *d.Result
-	inv := *res.Investigate
-	res.Investigate = &inv
 	d.Result = &res
 
-	for len(inv.Findings) > 0 {
+	var findings *[]protocol.FrictionFinding
+
+	switch {
+	case res.Investigate != nil:
+		inv := *res.Investigate
+		res.Investigate = &inv
+		findings = &inv.Findings
+	case res.Analyse != nil:
+		an := *res.Analyse
+		res.Analyse = &an
+		findings = &an.Findings
+	default:
+		return d
+	}
+
+	for len(*findings) > 0 {
 		enc, err := json.Marshal(d)
 		if err != nil || len(enc) <= maxBytes {
 			break
 		}
 
-		inv.Findings = inv.Findings[:len(inv.Findings)-1]
+		*findings = (*findings)[:len(*findings)-1]
 	}
 
 	return d

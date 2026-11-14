@@ -66,7 +66,7 @@ internal/secrets/      → Source (static env file) + RunCredentials (stages per
 internal/webhook/    → HTTP server for lifecycle webhooks; embeds backendkit's webhookcore.Core (HMAC auth, drain gate, request metrics, SSE /logs, health/readyz/images) and adds the agent-only lifecycle handlers plus /message dedup over webhookcore's DedupCache; mounts backendkit's llmproxy at /llm
 internal/callback/   → status callbacks to /api/agent/status; VerifyAutonomous (fail-closed)
 internal/cmclient/   → MCP client for CM card operations (one agent identity per card)
-internal/filelog/    → raw container-output file logs, one per card and one per run kind of the card (<log_dir>/<project>/<card_id>.log, <card_id>-<kind>.log; always on, default ~/.contextmatrix/agent/logs; pruned after log_retention_days); section.go copies one run's section of a card's log for investigate
+internal/filelog/    → raw container-output file logs, one per card, one per run kind of a card, and one per card-less run kind (<log_dir>/<project>/<card_id>.log, <card_id>-<kind>.log, <kind>.log; always on, default ~/.contextmatrix/agent/logs; pruned after log_retention_days); section.go copies one run's section of a card's log for investigate and analyse
 internal/metrics/    → thin wrapper over backendkit's shared metrics bundle (cm_agent_* collectors, NormalizeEndpoint label allowlist); keeps the agent-only callback-retries counter
 internal/buildinfo/  → the build /health reports: ldflags-stamped version, commit and build time plus the embedded merge history (history/merges.log, parsed by protocol's changelog)
 
@@ -268,9 +268,10 @@ Summaries only - full detail lives in the reference documents above.
     once per run. Every POC card asks for main-behaviour tests only; without
     mob review it also gets one generic reviewer, blockers-only fix requests
     and no cleanup pass. The verdict code has no POC branch.
-16. **Run kinds.** `POST /run-kind` launches sandboxed check and investigate
-    runs for a card: keyed apart from its card run, no MCP key, one status at
-    the end with the result and usage. See `docs/run-kinds.md`.
+16. **Run kinds.** `POST /run-kind` launches sandboxed `check`, `investigate`,
+    `analyse` and `guidance_pr` runs: keyed apart from a card run, no MCP key,
+    one status at the end with the result and usage. `guidance_pr` is
+    project-level (no card) and runs no model. See `docs/run-kinds.md`.
 
 ## Running and testing
 

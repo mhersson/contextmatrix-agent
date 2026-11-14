@@ -198,7 +198,7 @@ func TestReadGroundingDirFollowsInRepoSymlink(t *testing.T) {
 func TestGroundingTruncationIsRuneSafe(t *testing.T) {
 	// A 3-byte rune straddling the cap boundary must not be split into invalid UTF-8.
 	root := t.TempDir()
-	writeNestedFile(t, root, "AGENTS.md", strings.Repeat("a", groundingByteCap-1)+"…tail")
+	writeNestedFile(t, root, "AGENTS.md", strings.Repeat("a", GroundingByteCap-1)+"…tail")
 
 	doc, _ := discoverGrounding(t.Context(), root)
 	require.NotNil(t, doc)

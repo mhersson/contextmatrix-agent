@@ -1,6 +1,7 @@
-// Package runkind runs the sandboxed run kinds ContextMatrix dispatches for one
-// card: one file per kind, no MCP. Each run clones the base branch, runs its
-// kind and ends with one run_outcome line carrying the masked, bounded result.
+// Package runkind runs the sandboxed run kinds ContextMatrix dispatches, for a
+// card or for a project: one file per kind, no MCP. Each run clones the base
+// branch, runs its kind and ends with one run_outcome line carrying the masked,
+// bounded result.
 package runkind
 
 import (
@@ -38,6 +39,9 @@ type Spec struct {
 	Input []byte
 	// RunLogPath is the stopped run's log section a model kind reads.
 	RunLogPath string
+	// OperatorValues are the operator's worker env values, masked in every
+	// result but a check's.
+	OperatorValues []string
 
 	Model, DefaultModel, ReasoningEffort                  string
 	Selection                                             *protocol.SelectionContext
@@ -56,21 +60,64 @@ func Run(ctx context.Context, spec Spec, client llm.LLM, emit *events.Emitter) r
 
 	return run(ctx, spec, log, red, emit, deps{
 		check: newCheckDeps(log, red.Apply),
-		investigate: func() (investigateDeps, error) {
-			return newInvestigateDeps(spec, client, red.Apply)
+		model: func() (modelDeps, error) {
+			return newModelDeps(spec, client, red.Apply)
 		},
+		guidance: func(ws string) guidanceDeps { return newGuidanceDeps(spec, ws) },
 	})
+}
+
+// minOperatorValueBytes is the shortest operator value masked: a shorter one
+// would mangle ordinary text.
+const minOperatorValueBytes = 8
+
+// operatorMask masks the provisioned secrets and each operator value of 8
+// bytes or more: what a run writes to git or to a card.
+func operatorMask(spec Spec) func(string) string {
+	secrets := []string{spec.GitToken, spec.LLMKey, spec.LLMOAuthToken}
+
+	for _, v := range spec.OperatorValues {
+		if len(v) >= minOperatorValueBytes {
+			secrets = append(secrets, v)
+		}
+	}
+
+	return redact.New(secrets).Apply
+}
+
+// resultMask masks a result. The results of check and guidance_pr are repo
+// text and identifiers (a PR URL, a path) that ContextMatrix matches exactly,
+// so they get the provisioned secrets only; any other kind's result can reach
+// git as cards, a park entry or a card section, so it gets the operator values
+// too.
+func resultMask(spec Spec) func(string) string {
+	if spec.Kind == protocol.RunKindCheck || spec.Kind == protocol.RunKindGuidancePR {
+		return redact.New([]string{spec.GitToken, spec.LLMKey, spec.LLMOAuthToken}).Apply
+	}
+
+	return operatorMask(spec)
 }
 
 // deps are the kinds' effects, one field per kind. A kind whose effects can
 // fail to build gets a constructor, called only when that kind runs.
 type deps struct {
-	check       checkDeps
-	investigate func() (investigateDeps, error)
+	check    checkDeps
+	model    func() (modelDeps, error)
+	guidance func(ws string) guidanceDeps
+}
+
+// workspaceDir is the run's clone directory: the card's, or the kind's for a
+// project-level kind that has no card.
+func workspaceDir(spec Spec) string {
+	if spec.CardID == "" {
+		return filepath.Join(spec.Workspace, spec.Kind)
+	}
+
+	return filepath.Join(spec.Workspace, strings.ToLower(spec.CardID))
 }
 
 func run(ctx context.Context, spec Spec, log *slog.Logger, red *redact.Redactor, emit *events.Emitter, d deps) runoutcome.Data {
-	ws := filepath.Join(spec.Workspace, strings.ToLower(spec.CardID))
+	ws := workspaceDir(spec)
 
 	res, usage, err := runKind(ctx, spec, ws, emit, d)
 	if err != nil {
@@ -80,7 +127,7 @@ func run(ctx context.Context, spec Spec, log *slog.Logger, red *redact.Redactor,
 		return runoutcome.Data{Cause: cause, Usage: usage}
 	}
 
-	res = limitResult(maskResult(res, red.Apply))
+	res = limitResult(maskResult(res, resultMask(spec)))
 
 	return fitOutcome(runoutcome.Data{Cause: protocol.StopCauseDone, Result: &res, Usage: usage}, maxOutcomeBytes)
 }
@@ -111,17 +158,46 @@ func runKind(ctx context.Context, spec Spec, ws string, emit *events.Emitter, d 
 			return protocol.RunKindResult{}, nil, fmt.Errorf("decode investigate input: %w", err)
 		}
 
-		inv, err := d.investigate()
+		md, err := d.model()
 		if err != nil {
 			return protocol.RunKindResult{}, nil, err
 		}
 
-		r, usage, err := investigate(ctx, ws, spec, in, inv, emit)
+		r, usage, err := investigate(ctx, ws, spec, in, md, emit)
 		if err != nil {
 			return protocol.RunKindResult{}, usage, err
 		}
 
 		return protocol.RunKindResult{Investigate: &r}, usage, nil
+	case protocol.RunKindAnalyse:
+		var in protocol.AnalyseInput
+		if err := json.Unmarshal(spec.Input, &in); err != nil {
+			return protocol.RunKindResult{}, nil, fmt.Errorf("decode analyse input: %w", err)
+		}
+
+		md, err := d.model()
+		if err != nil {
+			return protocol.RunKindResult{}, nil, err
+		}
+
+		r, usage, err := analyse(ctx, ws, spec, in, md, emit)
+		if err != nil {
+			return protocol.RunKindResult{}, usage, err
+		}
+
+		return protocol.RunKindResult{Analyse: &r}, usage, nil
+	case protocol.RunKindGuidancePR:
+		var in protocol.GuidancePRInput
+		if err := json.Unmarshal(spec.Input, &in); err != nil {
+			return protocol.RunKindResult{}, nil, fmt.Errorf("decode guidance_pr input: %w", err)
+		}
+
+		r, err := guidancePR(ctx, ws, spec, in, d.guidance(ws))
+		if err != nil {
+			return protocol.RunKindResult{}, nil, err
+		}
+
+		return protocol.RunKindResult{GuidancePR: &r}, nil, nil
 	default:
 		return protocol.RunKindResult{}, nil, fmt.Errorf("unknown run kind %q", spec.Kind)
 	}
@@ -181,6 +257,19 @@ func maskResult(r protocol.RunKindResult, mask func(string) string) protocol.Run
 		r.Investigate = &i
 	}
 
+	if r.Analyse != nil {
+		a := *r.Analyse
+		a.Findings = maskFindings(a.Findings, mask)
+		r.Analyse = &a
+	}
+
+	if r.GuidancePR != nil {
+		g := *r.GuidancePR
+		g.Outcome, g.PRURL, g.HeadSHA, g.File = mask(g.Outcome), mask(g.PRURL), mask(g.HeadSHA), mask(g.File)
+		g.AbsentFromRepo = mapStrings(g.AbsentFromRepo, mask)
+		r.GuidancePR = &g
+	}
+
 	return r
 }
 
@@ -206,16 +295,7 @@ func maskInvestigate(r protocol.InvestigateResult, mask func(string) string) pro
 		r.Fix = &fix
 	}
 
-	if r.Findings != nil {
-		findings := make([]protocol.FrictionFinding, len(r.Findings))
-		for i, f := range r.Findings {
-			f.Kind = mask(f.Kind)
-			f.Title, f.Text, f.Evidence = mask(f.Title), mask(f.Text), mask(f.Evidence)
-			findings[i] = f
-		}
-
-		r.Findings = findings
-	}
+	r.Findings = maskFindings(r.Findings, mask)
 
 	return r
 }

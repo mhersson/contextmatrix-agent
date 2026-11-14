@@ -21,7 +21,7 @@ type groundingDoc struct {
 }
 
 const (
-	groundingByteCap  = 64 * 1024 // 64 KB for the root doc
+	GroundingByteCap  = 64 * 1024 // 64 KB for the root doc
 	groundingMaxDocs  = 24        // listing count cap (protects monorepos)
 	groundingMaxDepth = 4         // directory levels below root to list
 )
@@ -257,13 +257,13 @@ func readGroundingFile(root, path string) (string, bool) {
 
 	// Bound the read BEFORE allocation: a multi-GB committed file (or a symlink to
 	// /dev/zero) must not OOM the worker before the 64 KB cap is applied.
-	data, err := io.ReadAll(io.LimitReader(f, groundingByteCap+1))
+	data, err := io.ReadAll(io.LimitReader(f, GroundingByteCap+1))
 	if err != nil {
 		return "", false
 	}
 
-	if len(data) > groundingByteCap {
-		return truncateGroundingUTF8(data, groundingByteCap) + "\n[... truncated at 64 KB ...]", true
+	if len(data) > GroundingByteCap {
+		return truncateGroundingUTF8(data, GroundingByteCap) + "\n[... truncated at 64 KB ...]", true
 	}
 
 	return string(data), true

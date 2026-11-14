@@ -14,23 +14,23 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// writeInputs writes the investigation's card files under root, read-only:
-// card.md, and subtasks/<id>.md and siblings/<id>.md, named <n>.md (1-based)
-// when a file has no card ID. The run log stays where serve mounted it.
-func writeInputs(root string, in protocol.InvestigateInput) error {
+// writeInputs writes a model kind's card files under root, read-only: card.md,
+// and subtasks/<id>.md and siblings/<id>.md, named <n>.md (1-based) when a file
+// has no card ID. The run log stays where serve mounted it.
+func writeInputs(root, card string, subtasks, siblings []string) error {
 	if err := os.MkdirAll(root, 0o750); err != nil {
 		return fmt.Errorf("create %s: %w", root, err)
 	}
 
-	if err := writeReadOnly(filepath.Join(root, "card.md"), in.Card); err != nil {
+	if err := writeReadOnly(filepath.Join(root, "card.md"), card); err != nil {
 		return err
 	}
 
-	if err := writeCards(filepath.Join(root, "subtasks"), in.Subtasks); err != nil {
+	if err := writeCards(filepath.Join(root, "subtasks"), subtasks); err != nil {
 		return err
 	}
 
-	return writeCards(filepath.Join(root, "siblings"), in.Siblings)
+	return writeCards(filepath.Join(root, "siblings"), siblings)
 }
 
 func writeCards(dir string, files []string) error {
@@ -103,11 +103,42 @@ func fetchWorkBranch(ctx context.Context, spec Spec, ws string) (string, error) 
 		return "", nil
 	}
 
-	if err := git.Fetch(ctx, "+refs/heads/"+branch+":refs/remotes/origin/"+branch); err != nil {
+	if err := fetchBranch(ctx, git, branch); err != nil {
 		return "", fmt.Errorf("fetch work branch: %w", err)
 	}
 
 	return branch, nil
+}
+
+// guidanceBranch is the project's standing guidance PR head.
+func guidanceBranch(project string) string {
+	return protocol.GuidanceBranchPrefix + project
+}
+
+// fetchGuidanceBranch fetches the project's guidance branch into
+// refs/remotes/origin/ and returns its name; "" when the remote has none.
+func fetchGuidanceBranch(ctx context.Context, spec Spec, ws string) (string, error) {
+	git := worker.NewGit(ws, spec.SecretsPath, worker.HostFromRepoURL(spec.RepoURL), spec.CACertFile)
+	branch := guidanceBranch(spec.Project)
+
+	tip, err := git.RemoteTip(ctx, branch)
+	if err != nil {
+		return "", fmt.Errorf("look up guidance branch: %w", err)
+	}
+
+	if tip == "" {
+		return "", nil
+	}
+
+	if err := fetchBranch(ctx, git, branch); err != nil {
+		return "", fmt.Errorf("fetch guidance branch: %w", err)
+	}
+
+	return branch, nil
+}
+
+func fetchBranch(ctx context.Context, git *worker.Git, branch string) error {
+	return git.Fetch(ctx, "+refs/heads/"+branch+":refs/remotes/origin/"+branch)
 }
 
 // cardBranch is the card's plain work branch in the worker's cm/ namespace.

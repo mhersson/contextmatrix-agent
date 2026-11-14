@@ -38,10 +38,16 @@ type RunKey struct {
 }
 
 // Name is the segment that names the run's container, credentials dir and log
-// file. A run kind's name can never equal a card ID, which ends in digits.
+// file. A project-level run kind has no card and is named by its kind alone.
+// A run kind's name can never equal a card ID, which ends in digits: neither
+// does the kind alone.
 func (k RunKey) Name() string {
 	if k.Kind == "" {
 		return k.CardID
+	}
+
+	if k.CardID == "" {
+		return k.Kind
 	}
 
 	return k.CardID + "." + k.Kind

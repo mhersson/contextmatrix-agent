@@ -30,7 +30,7 @@ type SectionSource interface {
 	CopySection(project, cardID, runID string, w io.Writer) error
 }
 
-// handleRunKind admits a sandboxed run kind for one card: validate, refuse at
+// handleRunKind admits a sandboxed run kind, for a card or a project: validate, refuse at
 // capacity, then 202 and an asynchronous launch, as /trigger does.
 func (s *Server) handleRunKind(w http.ResponseWriter, r *http.Request) {
 	var p protocol.RunKindPayload
@@ -54,7 +54,7 @@ func (s *Server) handleRunKind(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	spec := s.buildRunKindSpec(p, requestRunID(r, p.CardID+"-"+p.Kind))
+	spec := s.buildRunKindSpec(p, requestRunID(r, runKindRunBase(p)))
 
 	// Registered before the 202 so a kind-scoped /kill that follows it always
 	// finds the admission. Detached from the request: the launch outlives it.
@@ -63,6 +63,16 @@ func (s *Server) handleRunKind(w http.ResponseWriter, r *http.Request) {
 	webhookcore.WriteJSON(w, http.StatusAccepted, protocol.SuccessResponse{OK: true})
 
 	go s.launchRunKind(ctx, adm, p, spec) //nolint:gosec // G118: the launch outlives the request on its admission context, detached from the request and bounded by the launch timeout
+}
+
+// runKindRunBase is the run ID base: the card and kind, or the project and kind
+// for a project-level kind that has no card.
+func runKindRunBase(p protocol.RunKindPayload) string {
+	if p.CardID == "" {
+		return p.Project + "-" + p.Kind
+	}
+
+	return p.CardID + "-" + p.Kind
 }
 
 // launchRunKind stages the run's inputs, then admits and launches it through
@@ -114,7 +124,7 @@ func (s *Server) admitRunKind(ctx context.Context, adm *admission, req launchReq
 }
 
 // stageRunKind writes the kind's input into the run's input dir, and for
-// investigate the stopped run's log section beside it.
+// investigate and analyse the stopped run's log section beside it.
 func (s *Server) stageRunKind(req launchRequest, p protocol.RunKindPayload) (string, launchFailure) {
 	runID := req.Spec.CorrelationID
 
@@ -125,7 +135,7 @@ func (s *Server) stageRunKind(req launchRequest, p protocol.RunKindPayload) (str
 		return "", infraFailure("run input staging failed")
 	}
 
-	if p.Kind != protocol.RunKindInvestigate {
+	if !usesModel(p.Kind) {
 		return dir, launchFailure{}
 	}
 
@@ -158,7 +168,7 @@ func (s *Server) stageRunLog(dir string, p protocol.RunKindPayload) (err error) 
 		}
 	}()
 
-	return s.sections.CopySection(p.Project, p.CardID, p.Investigate.RunID, f)
+	return s.sections.CopySection(p.Project, p.CardID, runLogID(p), f)
 }
 
 // stageRunInput creates the run's input dir and writes the kind's input into
@@ -183,8 +193,13 @@ func (s *Server) stageRunInput(runID string, input any) (string, error) {
 
 // runKindInput is the input the payload's kind runs on.
 func runKindInput(p protocol.RunKindPayload) any {
-	if p.Kind == protocol.RunKindCheck {
+	switch p.Kind {
+	case protocol.RunKindCheck:
 		return p.Check
+	case protocol.RunKindAnalyse:
+		return p.Analyse
+	case protocol.RunKindGuidancePR:
+		return p.GuidancePR
 	}
 
 	return p.Investigate

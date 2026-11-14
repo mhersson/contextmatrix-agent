@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/mhersson/contextmatrix-agent/internal/cardid"
 	"github.com/mhersson/contextmatrix-agent/internal/config"
@@ -77,13 +78,23 @@ func prepareRunKind(kind, inputPath string) (runkind.Spec, llm.LLM, error) {
 // runKindSpecFromEnv builds a run kind's spec from the env serve writes. It
 // needs no CM_MCP_URL or CM_MCP_API_KEY: a run kind gets neither.
 func runKindSpecFromEnv(kind string) (runkind.Spec, error) {
-	cardID, err := requireEnv("CM_CARD_ID")
-	if err != nil {
-		return runkind.Spec{}, err
-	}
+	var cardID string
 
-	if !cardid.Valid(cardID) {
-		return runkind.Spec{}, fmt.Errorf("env var CM_CARD_ID: invalid card ID %q (want PREFIX-NNN)", cardID)
+	if kind == protocol.RunKindGuidancePR {
+		if os.Getenv("CM_CARD_ID") != "" {
+			return runkind.Spec{}, fmt.Errorf("env var CM_CARD_ID: must be empty for %s", kind)
+		}
+	} else {
+		var err error
+
+		cardID, err = requireEnv("CM_CARD_ID")
+		if err != nil {
+			return runkind.Spec{}, err
+		}
+
+		if !cardid.Valid(cardID) {
+			return runkind.Spec{}, fmt.Errorf("env var CM_CARD_ID: invalid card ID %q (want PREFIX-NNN)", cardID)
+		}
 	}
 
 	project, err := requireEnv("CM_PROJECT")
@@ -134,7 +145,22 @@ func runKindSpecFromEnv(kind string) (runkind.Spec, error) {
 		MaxCostUSD:      maxCost,
 		BashTimeoutMax:  bashTimeoutMax,
 		ToolOutputMax:   toolOutputMax,
+		OperatorValues:  operatorValues(os.Getenv("CM_OPERATOR_ENV_NAMES")),
 	}, nil
+}
+
+// operatorValues returns the non-empty values of the env vars named in the
+// comma-separated names.
+func operatorValues(names string) []string {
+	var out []string
+
+	for name := range strings.SplitSeq(names, ",") {
+		if v := os.Getenv(strings.TrimSpace(name)); v != "" {
+			out = append(out, v)
+		}
+	}
+
+	return out
 }
 
 // readRunKindFiles fills spec's secrets from src, read as work reads them, and

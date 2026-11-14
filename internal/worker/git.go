@@ -847,6 +847,48 @@ func (g *Git) CommitFixup(ctx context.Context, target string) (bool, error) {
 	return true, nil
 }
 
+// CommitPath commits only path. It refuses, committing nothing, when anything
+// else is staged, so a stray index entry never rides along. It reports false
+// when path has no change.
+func (g *Git) CommitPath(ctx context.Context, path, message string) (bool, error) {
+	if _, err := g.run(ctx, "add", "--", path); err != nil {
+		return false, fmt.Errorf("stage %s: %w", path, err)
+	}
+
+	out, err := g.run(ctx, "diff", "--cached", "--name-only")
+	if err != nil {
+		return false, fmt.Errorf("list staged paths: %w", err)
+	}
+
+	var extra []string
+
+	staged := false
+
+	for name := range strings.SplitSeq(strings.TrimSpace(out), "\n") {
+		switch name {
+		case "":
+		case path:
+			staged = true
+		default:
+			extra = append(extra, name)
+		}
+	}
+
+	if len(extra) > 0 {
+		return false, fmt.Errorf("commit %s: other paths are staged: %s", path, strings.Join(extra, ", "))
+	}
+
+	if !staged {
+		return false, nil
+	}
+
+	if _, err := g.run(ctx, "commit", "-m", message); err != nil {
+		return false, fmt.Errorf("commit %s: %w", path, err)
+	}
+
+	return true, nil
+}
+
 // LastCommitTouching returns the hash of the most recent commit that touches
 // any of the given paths. It returns ("", nil) when no commit touches them.
 func (g *Git) LastCommitTouching(ctx context.Context, paths []string) (string, error) {

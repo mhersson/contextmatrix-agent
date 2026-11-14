@@ -2,21 +2,35 @@
 
 ## What a run kind is
 
-A run kind is a sandboxed run ContextMatrix's Sentinel dispatches for one card:
-`check` (no model) and `investigate` (a model run). A run kind gets no MCP key,
-never writes the card, and reports only through its one terminal status. It
-runs in the project's worker image, beside the card's own run if one is live.
-`analyse` and `guidance_pr` are reserved names, refused until they ship.
+A run kind is a sandboxed run ContextMatrix's Sentinel dispatches: `check` (no
+model), `investigate` and `analyse` (model runs, each on one card's run log) and
+`guidance_pr` (no model; project-level, takes no card, and writes git). A run
+kind gets no MCP key, never writes the card, and reports only through its one
+terminal status. It runs in the project's worker image, beside the card's own
+run if one is live.
 
 ## Dispatch
 
 ContextMatrix calls `POST /run-kind` with a `protocol.RunKindPayload`. The
 route is HMAC-authenticated and drain-gated like `/trigger`.
 `runKindInvalidField` (`internal/webhook/runkind_validate.go`) checks, in
-order: the kind (`check` or `investigate`), the card ID (the pattern `work`
-enforces, `internal/cardid`), the git token, that exactly the kind's own input
-is set, that an `llm_endpoint` is set exactly for `investigate`, and that
-`investigate` has `max_cost_usd > 0`. The answers are:
+order, the first failure naming its field in the message:
+
+| Field                                  | Rejected when                                                                          |
+| -------------------------------------- | -------------------------------------------------------------------------------------- |
+| `kind`                                 | not `check`, `investigate`, `analyse` or `guidance_pr`                                 |
+| `card_id`                              | not empty for `guidance_pr`; not the pattern `work` enforces (`internal/cardid`) else  |
+| `git_token`                            | empty                                                                                  |
+| `check`, `investigate`, `analyse`, `guidance_pr` | set for another kind, or missing for its own                                 |
+| `llm_endpoint`                         | not set exactly for a model kind (`investigate`, `analyse`)                            |
+| `max_cost_usd`                         | not above 0 for a model kind, or not 0 for a kind without a model                      |
+| `guidance_pr.section`                  | empty, over 16 KiB, or containing `<!-- sentinel:`                                     |
+| `guidance_pr.title`                    | empty, over 256 bytes, or holding a newline or carriage return                         |
+| `guidance_pr.body`                     | over 60 KiB                                                                            |
+| `guidance_pr.allowed`                  | over 64 entries, or an entry over 512 bytes                                            |
+| `guidance_pr.expect_head`              | not empty and not 40 or 64 lower-case hex characters                                   |
+
+The answers are:
 
 | Status | Code            | When                                           |
 | ------ | --------------- | ---------------------------------------------- |
@@ -28,7 +42,8 @@ is set, that an `llm_endpoint` is set exactly for `investigate`, and that
 | 202    | -               | accepted; the launch runs asynchronously       |
 
 `handleRunKind` (`internal/webhook/runkind.go`) mints the run id from the card
-ID and the kind plus a random suffix, then the `X-Correlation-ID` header, as
+ID (the project for `guidance_pr`, which has no card) and the kind plus a random
+suffix, then the `X-Correlation-ID` header, as
 `/trigger` does, and launches through the card runs' admission path
 (`admitAndLaunch`, `internal/webhook/launch.go`). A run kind sends no `running`
 status. A launch that fails sends one `failed` status with `kind`, `run_id` and
@@ -37,9 +52,12 @@ launch a `/kill` or `/stop-all` stopped sends none.
 
 `buildRunKindSpec` (`internal/webhook/runkind_spec.go`) gives the container
 `CM_RUN_KIND`, `CM_CARD_ID`, `CM_PROJECT`, `CM_REPO_URL` and `CM_BASE_BRANCH`;
-`investigate` adds `CM_MODEL`, `CM_MAX_COST_USD` and `CMX_SELECTION`. Then come
+a model kind adds `CM_MODEL`, `CM_MAX_COST_USD` and `CMX_SELECTION`. Then come
 the `CMX_*` knobs every run takes (default model, reasoning effort, bash
-timeout, tool output cap, container timeout) and `worker_extra_env`. The
+timeout, tool output cap, container timeout) and `worker_extra_env`, whose names
+(the text before the first `=`, in order, joined by `,`) also ride
+`CM_OPERATOR_ENV_NAMES`; never their values, and it is unset when there is no
+extra env. The
 payload's `worker_image` overrides `base_image`. There is no `CM_MCP_URL`,
 `CM_MCP_API_KEY`, `CMX_ATTEMPT` or `CMX_VERIFY`, and no task skills.
 
@@ -70,6 +88,11 @@ its run kinds coexist and never block each other. All of them share
 `<log_dir>/<project>/<card>-<kind>.log`, so a run kind's header never counts
 toward the card's attempt number.
 
+A project-level kind has no card. Its key's name is the kind, so its container
+is `cm-agent-<project>-<kind>`, its file log `<log_dir>/<project>/<kind>.log`
+and its run ID `<project>-<kind>-<suffix>`; there is one such run per project
+at a time.
+
 ## Kill and listing
 
 `/kill` with a `kind` stops that run kind's admission if one is in flight and
@@ -84,14 +107,19 @@ status is `failed` with its kind and stop cause `shutdown`
 ## Credentials
 
 The agent stages the payload's git token into the run's own credentials dir
-once, for the clone at start, and never refreshes it: the payload carries no
-expiry. The agent cannot narrow the token, so on a personal access token
+once and never refreshes it: the payload carries no
+expiry. A run uses it for the clone; `guidance_pr` also uses it for its remote
+lookups, fetch, push and `gh` calls. The agent cannot narrow the token, so on a personal access token
 installation the run may carry the PAT's full scope. The run kinds give the
 model no tool that writes to git.
 
-An `investigate` run gets its LLM access as a card run does: a stand-in token
+`guidance_pr` writes git by code. Its token can push and open pull requests on
+its one repo and is used only by that code: the container runs no model, so no
+tool can reach it. The worker's push guard allows one ref, the guidance branch.
+
+A model kind gets its LLM access as a card run does: a stand-in token
 for serve's LLM proxy, or the subscription token for a `claude_code` endpoint.
-A `check` registers nothing with the proxy and stages no LLM values
+A kind without a model registers nothing with the proxy and stages no LLM values
 (`stageLLM`, `internal/webhook/launch.go`). On Claude Code the built-in Read is
 not confined to the read roots, so the model can read `/run/cm-secrets/env`,
 the git token and the subscription token included; both are masked in every
@@ -108,7 +136,7 @@ sweeps `.run-inputs` at start (`internal/cli/serve.go`).
 
 ## The stopped run's log
 
-For `investigate`, serve finds the stopped run's section in the card's durable
+For `investigate` and `analyse`, serve finds the stopped run's section in the card's durable
 log by its `run=<id>` header and footer fields and copies all of it into
 `run.log` in the run's input dir, next to `input.json`, before the launch
 (`internal/filelog/section.go`, `stageRunLog` in `internal/webhook/runkind.go`).
@@ -116,10 +144,10 @@ The dir is mounted read-only, so the model reads the section with its grep and
 read tools and never whole. A run still writing has its section copied up to the
 end of the file. A 256 MiB safety cap keeps the first 32 MiB and the last 224
 MiB, with a `==== <n> bytes cut ====` line between them. A missing section fails
-the investigation as `run log not found` with stop cause `error`; any other
+the run as `run log not found` with stop cause `error`; any other
 staging error fails it with stop cause `infrastructure`. Nothing launches in
-either case. A run kind writes its own `<card>-<kind>` log, never into the
-card's file.
+either case. A run kind writes its own `<card>-<kind>` log (`guidance_pr`:
+`<project>/<kind>.log`), never into the card's file.
 
 ## In the worker
 
@@ -130,12 +158,17 @@ does, and reads its input from `/run/cm-input/input.json`. When the secrets
 file carries LLM access, which serve stages only for a kind that needs a model,
 it builds the LLM client as a card run does; a `check` gets none. `runkind.Run`
 (`internal/runkind/runkind.go`) clones the base branch, or the remote default
-when none is set, into `/home/user/workspace/<card id in lower case>`, decodes
+when none is set, into `/home/user/workspace/<card id in lower case>` (`/home/user/workspace/<kind>` for `guidance_pr`), decodes
 the input and runs the kind. Its stdout ends with one `run_outcome` line: the
 cause, a model kind's usage rows, and on `done` the result. Before it is
 written, the result is masked with the secrets the worker holds (the git token,
 the LLM key and the subscription token), then bounded to the size limits below,
 then fitted to the outcome limit (`fitOutcome`, `internal/runkind/limits.go`).
+A model kind's result can reach git, so it is masked as well with each operator
+value of 8 bytes or more: the env vars named by `CM_OPERATOR_ENV_NAMES`
+(`resultMask`, `internal/runkind/runkind.go`). The results of `check` (repo text)
+and `guidance_pr` (a PR URL and a path ContextMatrix matches exactly) keep exact
+matching, with the provisioned secrets only.
 A run that cannot read its env or files, build its model executor, clone, or
 decode its input ends with cause `error` and no result. Any cause but `done`
 exits non-zero.
@@ -218,7 +251,7 @@ It reads:
 
 - the card, its subtasks and the siblings from the input, written read-only
   under `/home/user/investigation` as `card.md`, `subtasks/<id>.md` and
-  `siblings/<id>.md` (`writeInputs`, `internal/runkind/investigate_inputs.go`).
+  `siblings/<id>.md` (`writeInputs`, `internal/runkind/model_inputs.go`).
   A file whose frontmatter has no valid card ID is named by its 1-based position.
 - the stopped run's whole log section, in place at `/run/cm-input/run.log` on
   the read-only input mount. The prompt names it and tells the model to search
@@ -229,13 +262,13 @@ It reads:
   offset and limit.
 - the repository at the base branch, and the card's work branch fetched into
   `refs/remotes/origin/`: `cm/<card id in lower case>` when the remote has it,
-  else the one `cm/<card id in lower case>-<Jira key>` branch (`workBranch`, `internal/runkind/investigate_inputs.go`).
+  else the one `cm/<card id in lower case>-<Jira key>` branch (`workBranch`, `internal/runkind/model_inputs.go`).
   With no work branch on the remote the investigation runs without one; a
   failure to list the remote's branches, or to fetch one that exists, ends the
   run with cause `error`. Git runs
   with the credential helper, so the token stays out of argv.
 
-Its tools are the diagnose pass's read-only set: `read`, `grep` and `glob` on
+Its tools are the diagnose pass's read-only set (`readOnlyTools`, `internal/runkind/model.go`, shared with `analyse`): `read`, `grep` and `glob` on
 the workspace, with the inputs dir and the run log's dir as extra read-only
 roots, and the read-only `git` tool (status, diff, log, show, branch), plus the
 terminal `report_investigation` tool. There is no bash, edit or write. On
@@ -247,7 +280,7 @@ the reviewer pick at the complex tier from the payload's selection when it
 meets its bar, else the base model: `CM_MODEL`, else `CMX_DEFAULT_MODEL`, else
 the built-in capable default. The executor is built as a card run's is: the
 harness over the metered client on an endpoint, the `claude` binary with the
-endpoint's effort on Claude Code. The run has an 80-turn cap. On an endpoint it
+endpoint's effort on Claude Code. The run has an 80-turn cap (`modelConfig`). On an endpoint it
 also gets a wrap-up nudge 5 turns before the cap, one grace call for the
 report, the context window from the selection and the reasoning effort knob.
 The output of the harness tools, bridged ones included, is masked with the
@@ -269,8 +302,9 @@ ran the model. The fix and `forward_to` pass through as reported: ContextMatrix
 vets the fix and treats `card` without a fix, or a fix with another cause, as no
 fix.
 
-The limits, applied after masking (`limitInvestigate` and `fitOutcome`,
-`internal/runkind/limits.go`):
+The limits, applied after masking (`limitInvestigate`, `limitFindings` and
+`fitOutcome`, `internal/runkind/limits.go` and `findings.go`). The finding rows
+apply to every kind that reports findings, `analyse` included:
 
 | Item                       | Limit         | Over the limit                            |
 | -------------------------- | ------------- | ----------------------------------------- |
@@ -285,6 +319,104 @@ The limits, applied after masking (`limitInvestigate` and `fitOutcome`,
 
 The fit leaves room for the event envelope under serve's 1 MiB status limit,
 and the diagnosis and the fix always survive it.
+
+## Analyse
+
+`analyse` runs one model pass over a finished card run and reports its friction
+findings (`analyse`, `internal/runkind/analyse.go`). It never writes anything:
+its findings are proposals ContextMatrix vets.
+
+It reads:
+
+- the card and its subtasks from the input, written read-only under the inputs
+  dir as `card.md` and `subtasks/<id>.md`, named as for investigate; it has no
+  siblings.
+- the run's whole log section, in place at `/run/cm-input/run.log`, searched and
+  read in ranges as for investigate.
+- the repository at the base branch with its grounding, and the card's work
+  branch fetched into `refs/remotes/origin/` as for investigate.
+- the project's guidance branch, `cm/sentinel/<project>`
+  (`protocol.GuidanceBranchPrefix`), fetched into `refs/remotes/origin/` when
+  the remote has it (`fetchGuidanceBranch`, `internal/runkind/model_inputs.go`),
+  so the model sees guidance already merged or pending and does not repeat it.
+  A failure to look the branch up, or to fetch one that exists, ends the run
+  with cause `error`.
+
+Its tools, its model and its executor are investigate's, with the terminal tool
+`report_analysis` in place of `report_investigation` and a 40-turn cap; the
+wrap-up nudge, grace call, context window and output masking are the same. The
+model is the decision model (`orchestrator.DecisionModel`).
+
+The result is `report_analysis`'s arguments, a `protocol.AnalyseResult`: the
+friction `findings`, which are `[]` when the run shows none. The tool refuses
+arguments that do not decode and a finding whose kind is not one of the six or
+whose text is empty (`findingFault`, `internal/runkind/findings.go`), so the
+model can correct them. A run that ends without the call ends with cause
+`error`, and the stop causes and usage rows are investigate's. The findings are
+masked and bounded by the finding limits in the table under Investigate.
+
+## Guidance PR
+
+`guidance_pr` appends ContextMatrix-vetted guidance to the project's block in
+the repo's instruction file and opens or updates a pull request
+(`guidancePR`, `internal/runkind/guidance.go`). It runs no model and takes no
+card; its workspace is `<workspace>/guidance_pr`. Its input is a
+`protocol.GuidancePRInput`: `section`, `title`, `body`, `allowed` and
+`expect_head`.
+
+The branch is `cm/sentinel/<project>` (`protocol.GuidanceBranchPrefix`), the
+only ref the run may push: the worker's push guard is set to it before any
+push, and a force push is allowed only inside `cm/`, never to the base or the
+remote default. The run never merges, closes or labels a PR.
+
+The run goes in this order, and stops at the first step that ends it:
+
+1. `section`, `title` and `body` are masked with the provisioned secrets and the
+   operator's worker env values of 8 bytes or more.
+2. It reads the branch's remote tip, then the open PR whose head is the branch, ignoring pull requests from forks.
+3. Stale: `expect_head` is set and there is no open PR, or the PR's head or the
+   tip differs from it; or `expect_head` is empty and a PR is open. The outcome
+   is `stale` and nothing is written.
+4. The text check runs on the base clone, as for `check`, with the candidate
+   verify commands as the declared ones. Entries in `allowed` (compared
+   exactly) pass; any other entry the repo lacks gives `refused` with them in
+   `absent_from_repo`, cut and truncated as the check's.
+5. The file is the one grounding reads: root `AGENTS.md`, else root `CLAUDE.md`,
+   else a new `AGENTS.md`. When that name is a symlink it is followed if the
+   target is a regular file inside the repo, outside `.git`, with no symlink on
+   its path; the target is then the file written, committed and reported
+   (`AGENTS.md` linking to `docs/AGENTS.md` reports `docs/AGENTS.md`, and the
+   link stays). A link that escapes the repo, is missing, is chained or points
+   to a directory, or a root name that is a directory, ends the run with cause
+   `error`.
+6. The new text is the base branch's file with `section` appended to the
+   project's block (`<!-- sentinel:<project>:start -->` to `:end -->`, headed
+   `## Sentinel guidance`), or a new block. Merged and human-edited guidance on
+   the base stays as it is. Grounding injects only the first 64 KiB of the file,
+   so a new block that would end past that goes right after the file's first
+   `# ` line (or at the top), and an existing block whose revised end would pass
+   it moves there whole, byte for byte plus the new section. Unbalanced or repeated markers end the run with
+   cause `error`.
+7. With `expect_head` the branch is cut from that commit, fetched from the
+   remote; the instruction file must resolve to the same path there as on the
+   base, else the run ends with cause `error` before writing. Without it, the
+   branch is cut from the base branch.
+8. Only the file is committed, with `title` as the message. When nothing
+   changed (possible only with `expect_head`) the PR's title and body are
+   updated and the outcome is `unchanged`.
+9. The push: with `expect_head` a plain push on top of it; without it a plain
+   push when the branch is new, else a force push leased on the tip read in
+   step 2, which replaces a closed PR's branch. A failed push is `stale` when
+   the remote tip is no longer the one the push expected, otherwise cause
+   `error`.
+10. The PR is created against the base branch when none is open, else its title
+    and body are updated. The outcome is `pushed` with the PR URL, the new tip
+    and the file.
+
+The result is masked with the provisioned secrets only, so the PR URL stays
+exact; the input (`section`, `title`, `body`) gets the operator values too.
+`absent_from_repo` is bounded. A failed
+run has no result.
 
 ## Spend
 
@@ -326,9 +458,17 @@ rows never reach the card's budget.
 | `internal/runkind/runkind.go`            | The spec, the clone, the kind switch, masking and the stop cause      |
 | `internal/runkind/check.go`              | The check kind: candidates, the trial rules, the trial and its events |
 | `internal/runkind/textcheck.go`          | The text check: token extraction and the base-branch lookup           |
-| `internal/runkind/investigate.go`        | The investigate kind: model access, the model run                     |
-| `internal/runkind/investigate_inputs.go` | The card files written as read-only inputs, the work-branch lookup    |
+| `internal/runkind/model.go`              | What the model kinds share: model access, config, tools, the run      |
+| `internal/runkind/model_inputs.go`       | The card files written as read-only inputs, the branch lookups        |
+| `internal/runkind/investigate.go`        | The investigate kind: its inputs and report                           |
 | `internal/runkind/investigate_tool.go`   | The `report_investigation` tool: decoding and checking the report     |
 | `internal/runkind/investigate_prompt.go` | The investigation's task prompt                                       |
+| `internal/runkind/analyse.go`            | The analyse kind: its inputs and findings                             |
+| `internal/runkind/analyse_tool.go`       | The `report_analysis` tool: decoding and checking the findings        |
+| `internal/runkind/analyse_prompt.go`     | The analysis's task prompt                                            |
+| `internal/runkind/guidance.go`           | The guidance_pr kind: staleness, text check, file, commit, push, PR   |
+| `internal/runkind/guidance_file.go`      | The instruction file: the grounding choice and following a symlink    |
+| `internal/runkind/guidance_block.go`     | The project's guidance block: markers, the appended text              |
 | `internal/runkind/spend.go`              | The metered client and the usage rows                                 |
 | `internal/runkind/limits.go`             | The result size limits and the outcome fit                            |
+| `internal/runkind/findings.go`           | A finding's schema, check, limit and mask, shared by the kinds        |
