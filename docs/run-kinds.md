@@ -24,7 +24,7 @@ order, the first failure naming its field in the message:
 | `check`, `investigate`, `analyse`, `guidance_pr` | set for another kind, or missing for its own                                 |
 | `llm_endpoint`                         | not set exactly for a model kind (`investigate`, `analyse`)                            |
 | `max_cost_usd`                         | not above 0 for a model kind, or not 0 for a kind without a model                      |
-| `guidance_pr.section`                  | empty, over 16 KiB, or containing `<!-- sentinel:`                                     |
+| `guidance_pr.section`                  | empty or over 16 KiB                                                                   |
 | `guidance_pr.title`                    | empty, over 256 bytes, or holding a newline or carriage return                         |
 | `guidance_pr.body`                     | over 60 KiB                                                                            |
 | `guidance_pr.allowed`                  | over 64 entries, or an entry over 512 bytes                                            |
@@ -358,8 +358,8 @@ masked and bounded by the finding limits in the table under Investigate.
 
 ## Guidance PR
 
-`guidance_pr` appends ContextMatrix-vetted guidance to the project's block in
-the repo's instruction file and opens or updates a pull request
+`guidance_pr` appends ContextMatrix-vetted guidance as plain lines to the
+repo's instruction file and opens or updates a pull request
 (`guidancePR`, `internal/runkind/guidance.go`). It runs no model and takes no
 card; its workspace is `<workspace>/guidance_pr`. Its input is a
 `protocol.GuidancePRInput`: `section`, `title`, `body`, `allowed` and
@@ -390,14 +390,12 @@ The run goes in this order, and stops at the first step that ends it:
    link stays). A link that escapes the repo, is missing, is chained or points
    to a directory, or a root name that is a directory, ends the run with cause
    `error`.
-6. The new text is the base branch's file with `section` appended to the
-   project's block (`<!-- sentinel:<project>:start -->` to `:end -->`, headed
-   `## Sentinel guidance`), or a new block. Merged and human-edited guidance on
-   the base stays as it is. Grounding injects only the first 64 KiB of the file,
-   so a new block that would end past that goes right after the file's first
-   `# ` line (or at the top), and an existing block whose revised end would pass
-   it moves there whole, byte for byte plus the new section. Unbalanced or repeated markers end the run with
-   cause `error`.
+6. The new text is the base branch's file with `section`'s lines appended
+   after one blank line; the file's other text stays as it is. Grounding
+   injects only the first 64 KiB of the file, so lines that would end past that
+   go right after the file's first `# ` line (or at the top). A revision of an
+   open PR rebuilds the file the same way, as the base branch's file plus the
+   section, which carries all of the PR's lines.
 7. With `expect_head` the branch is cut from that commit, fetched from the
    remote; the instruction file must resolve to the same path there as on the
    base, else the run ends with cause `error` before writing. Without it, the
@@ -469,7 +467,7 @@ rows never reach the card's budget.
 | `internal/runkind/analyse_prompt.go`     | The analysis's task prompt                                            |
 | `internal/runkind/guidance.go`           | The guidance_pr kind: staleness, text check, file, commit, push, PR   |
 | `internal/runkind/guidance_file.go`      | The instruction file: the grounding choice and following a symlink    |
-| `internal/runkind/guidance_block.go`     | The project's guidance block: markers, the appended text              |
+| `internal/runkind/guidance_append.go`    | The appended guidance lines and their place under the grounding cap   |
 | `internal/runkind/spend.go`              | The metered client and the usage rows                                 |
 | `internal/runkind/limits.go`             | The result size limits and the outcome fit                            |
 | `internal/runkind/findings.go`           | A finding's schema, check, limit and mask, shared by the kinds        |

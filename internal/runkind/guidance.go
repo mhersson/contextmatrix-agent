@@ -60,7 +60,7 @@ type guidanceRun struct {
 	branch, base string
 }
 
-// guidancePR appends in.Section to the project's block in the instruction file,
+// guidancePR appends in.Section's lines to the instruction file,
 // commits that one file on the project's guidance branch, pushes it and opens
 // or updates the PR. It never merges, closes or labels a PR.
 func guidancePR(ctx context.Context, ws string, spec Spec, in protocol.GuidancePRInput, d guidanceDeps) (protocol.GuidancePRResult, error) {
@@ -102,7 +102,7 @@ func guidancePR(ctx context.Context, ws string, spec Spec, in protocol.GuidanceP
 		return protocol.GuidancePRResult{Outcome: protocol.GuidanceRefused, AbsentFromRepo: missing}, nil
 	}
 
-	file, content, err := r.content(spec.Project)
+	file, content, err := r.content()
 	if err != nil {
 		return protocol.GuidancePRResult{}, err
 	}
@@ -164,8 +164,8 @@ func (r *guidanceRun) textCheck(ctx context.Context) ([]string, error) {
 }
 
 // content returns the instruction file's path and its new text: the base
-// branch's file with the section appended to the project's block.
-func (r *guidanceRun) content(project string) (file, text string, err error) {
+// branch's file with the section's lines appended.
+func (r *guidanceRun) content() (file, text string, err error) {
 	file, err = instructionFile(r.ws)
 	if err != nil {
 		return "", "", err
@@ -176,12 +176,7 @@ func (r *guidanceRun) content(project string) (file, text string, err error) {
 		return "", "", fmt.Errorf("read %s: %w", file, err)
 	}
 
-	text, err = withGuidance(string(old), project, r.in.Section)
-	if err != nil {
-		return "", "", err
-	}
-
-	return file, text, nil
+	return file, withGuidance(string(old), r.in.Section), nil
 }
 
 // startBranch cuts the guidance branch: from the expected head, or from the

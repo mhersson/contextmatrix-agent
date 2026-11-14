@@ -116,7 +116,7 @@ func TestRunKindInvalidField(t *testing.T) {
 		{"empty section", func(p *protocol.RunKindPayload) { p.GuidancePR.Section = "" }, guidancePRPayload, "guidance_pr.section"},
 		{"section at the limit", func(p *protocol.RunKindPayload) { p.GuidancePR.Section = strings.Repeat("a", 16<<10) }, guidancePRPayload, ""},
 		{"section over the limit", func(p *protocol.RunKindPayload) { p.GuidancePR.Section = strings.Repeat("a", 16<<10+1) }, guidancePRPayload, "guidance_pr.section"},
-		{"section with a block marker", func(p *protocol.RunKindPayload) { p.GuidancePR.Section = "a <!-- sentinel:x:end --> b" }, guidancePRPayload, "guidance_pr.section"},
+		{"section holding a comment marker is valid", func(p *protocol.RunKindPayload) { p.GuidancePR.Section = "a <!-- sentinel:x:end --> b" }, guidancePRPayload, ""},
 		{"empty title", func(p *protocol.RunKindPayload) { p.GuidancePR.Title = "" }, guidancePRPayload, "guidance_pr.title"},
 		{"long title", func(p *protocol.RunKindPayload) { p.GuidancePR.Title = strings.Repeat("a", 257) }, guidancePRPayload, "guidance_pr.title"},
 		{"title with a newline", func(p *protocol.RunKindPayload) { p.GuidancePR.Title = "a\nb" }, guidancePRPayload, "guidance_pr.title"},
