@@ -20,22 +20,13 @@ type prHost interface {
 	EditPR(ctx context.Context, prURL, title, body string) error
 }
 
-// guidanceDeps are the guidance_pr kind's effects besides git: publish masks
-// everything the run writes.
+// guidanceDeps are the guidance_pr kind's effects besides git.
 type guidanceDeps struct {
-	prs        prHost
-	candidates func(ws string) []orchestrator.VerifyCandidate
-	absent     func(ctx context.Context, ws string, tokens, declared []string) ([]string, error)
-	publish    func(string) string
+	prs prHost
 }
 
 func newGuidanceDeps(spec Spec, ws string) guidanceDeps {
-	return guidanceDeps{
-		prs:        worker.NewPRCreator(ws, spec.SecretsPath, spec.CACertFile, spec.RepoURL),
-		candidates: orchestrator.VerifyCandidates,
-		absent:     absentFromRepo,
-		publish:    operatorMask(spec),
-	}
+	return guidanceDeps{prs: worker.NewPRCreator(ws, spec.SecretsPath, spec.CACertFile, spec.RepoURL)}
 }
 
 // stale reports whether the branch or its PR is not as the caller expects.
@@ -73,7 +64,8 @@ type guidanceRun struct {
 // commits that one file on the project's guidance branch, pushes it and opens
 // or updates the PR. It never merges, closes or labels a PR.
 func guidancePR(ctx context.Context, ws string, spec Spec, in protocol.GuidancePRInput, d guidanceDeps) (protocol.GuidancePRResult, error) {
-	in.Section, in.Title, in.Body = d.publish(in.Section), d.publish(in.Title), d.publish(in.Body)
+	mask := operatorMask(spec)
+	in.Section, in.Title, in.Body = mask(in.Section), mask(in.Title), mask(in.Body)
 
 	git := worker.NewGit(ws, spec.SecretsPath, worker.HostFromRepoURL(spec.RepoURL), spec.CACertFile)
 	remoteDefault := git.RemoteDefaultBranch(ctx)
@@ -159,11 +151,11 @@ func guidancePR(ctx context.Context, ws string, spec Spec, in protocol.GuidanceP
 // lacks and the input does not allow.
 func (r *guidanceRun) textCheck(ctx context.Context) ([]string, error) {
 	var declared []string
-	for _, c := range r.d.candidates(r.ws) {
+	for _, c := range orchestrator.VerifyCandidates(r.ws) {
 		declared = append(declared, c.Display)
 	}
 
-	absent, err := r.d.absent(ctx, r.ws, textTokens(r.in.Section), declared)
+	absent, err := absentFromRepo(ctx, r.ws, textTokens(r.in.Section), declared)
 	if err != nil {
 		return nil, fmt.Errorf("text check: %w", err)
 	}
@@ -197,7 +189,7 @@ func (r *guidanceRun) content(project string) (file, text string, err error) {
 // expected head must resolve to the same file before anything is written.
 func (r *guidanceRun) startBranch(ctx context.Context, file string) error {
 	if r.in.ExpectHead != "" {
-		if err := r.git.Fetch(ctx, "+refs/heads/"+r.branch+":refs/remotes/origin/"+r.branch); err != nil {
+		if err := fetchBranch(ctx, r.git, r.branch); err != nil {
 			return fmt.Errorf("fetch guidance branch: %w", err)
 		}
 
@@ -247,11 +239,12 @@ func (r *guidanceRun) push(ctx context.Context, tip string) (lost bool, err erro
 		return false, nil
 	}
 
-	if now, tipErr := r.git.RemoteTip(ctx, r.branch); tipErr == nil && now != expected {
+	now, tipErr := r.git.RemoteTip(ctx, r.branch)
+	if tipErr == nil && now != expected {
 		return true, nil
 	}
 
-	return false, fmt.Errorf("push guidance branch: %w", pushErr)
+	return false, errors.Join(fmt.Errorf("push guidance branch: %w", pushErr), tipErr)
 }
 
 // openPR creates the PR, or updates the open one's title and body.

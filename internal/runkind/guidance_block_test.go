@@ -60,6 +60,10 @@ func TestWithGuidance(t *testing.T) {
 			"# Repo\n\nRules.\n\n" + newBlock, false,
 		},
 		{
+			"marker mentioned inline is not a marker", "# Repo\n\nWrap blocks in `<!-- sentinel:alpha:start -->` and `<!-- sentinel:alpha:end -->`.\n", "New rule.",
+			"# Repo\n\nWrap blocks in `<!-- sentinel:alpha:start -->` and `<!-- sentinel:alpha:end -->`.\n\n" + newBlock, false,
+		},
+		{
 			"file without block, many trailing newlines", "# Repo\n\nRules.\n\n\n", "New rule.\n",
 			"# Repo\n\nRules.\n\n" + newBlock, false,
 		},

@@ -10,7 +10,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mhersson/contextmatrix-agent/internal/orchestrator"
 	"github.com/mhersson/contextmatrix-harness/redact"
 	protocol "github.com/mhersson/contextmatrix-protocol"
 	"github.com/stretchr/testify/assert"
@@ -148,8 +147,8 @@ func guidanceIn(expectHead string) protocol.GuidancePRInput {
 	return protocol.GuidancePRInput{ExpectHead: expectHead, Section: testSection, Title: "Guidance", Body: "Body"}
 }
 
-func guidanceDepsFor(spec Spec, f *fakePRs) guidanceDeps {
-	return guidanceDeps{prs: f, candidates: orchestrator.VerifyCandidates, absent: absentFromRepo, publish: operatorMask(spec)}
+func guidanceDepsFor(f *fakePRs) guidanceDeps {
+	return guidanceDeps{prs: f}
 }
 
 // runGuidance clones into a fresh workspace and runs guidance_pr there.
@@ -159,7 +158,7 @@ func runGuidance(t *testing.T, spec Spec, in protocol.GuidancePRInput, f *fakePR
 	ws := workspaceDir(spec)
 	require.NoError(t, clone(t.Context(), spec, ws))
 
-	return guidancePR(t.Context(), ws, spec, in, guidanceDepsFor(spec, f))
+	return guidancePR(t.Context(), ws, spec, in, guidanceDepsFor(f))
 }
 
 func fileAt(t *testing.T, repoURL, rev, path string) string {
@@ -217,6 +216,22 @@ func TestGuidancePROpensAFreshPR(t *testing.T) {
 	require.Len(t, f.created, 1)
 	assert.Equal(t, prCall{title: "Guidance", body: "Body", base: "main", head: testBranch}, f.created[0])
 	assert.Empty(t, f.edited)
+}
+
+func TestGuidancePRTakesTheBaseFromTheRemoteDefault(t *testing.T) {
+	repo := standardRepo(t)
+	require.Equal(t, "refs/heads/main", tgit(t, bareDir(repo), "symbolic-ref", "HEAD"))
+
+	spec := guidanceSpec(t, repo)
+	spec.BaseBranch = ""
+	f := &fakePRs{}
+
+	res, err := runGuidance(t, spec, guidanceIn(""), f)
+	require.NoError(t, err)
+	assert.Equal(t, protocol.GuidancePushed, res.Outcome)
+	require.Len(t, f.created, 1)
+	assert.Equal(t, "main", f.created[0].base)
+	assert.Equal(t, tgit(t, bareDir(repo), "rev-parse", "main"), tgit(t, bareDir(repo), "rev-parse", remoteTip(t, repo)+"^"))
 }
 
 func TestGuidancePRRevisesItsOwnPR(t *testing.T) {
@@ -481,7 +496,7 @@ func TestGuidancePRKeepsTheResultExactAndMasksTheInput(t *testing.T) {
 	spec.Input = input
 
 	d := run(context.Background(), spec, slog.Default(), redact.New(nil), discardEmitter(), deps{
-		guidance: func(string) guidanceDeps { return guidanceDepsFor(spec, &fakePRs{}) },
+		guidance: func(string) guidanceDeps { return guidanceDepsFor(&fakePRs{}) },
 	})
 	require.Equal(t, protocol.StopCauseDone, d.Cause)
 
@@ -535,7 +550,7 @@ func TestRunGuidancePREndToEnd(t *testing.T) {
 	f := &fakePRs{}
 
 	d := run(context.Background(), spec, slog.Default(), redact.New(nil), discardEmitter(), deps{
-		guidance: func(string) guidanceDeps { return guidanceDepsFor(spec, f) },
+		guidance: func(string) guidanceDeps { return guidanceDepsFor(f) },
 	})
 
 	require.Equal(t, protocol.StopCauseDone, d.Cause)

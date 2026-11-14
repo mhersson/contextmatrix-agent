@@ -8,7 +8,7 @@ import (
 )
 
 // analyseTask is the analysis's task. Its slots are filled by analysePrompt.
-const analyseTask = `%sYou are analysing a finished autonomous run of a card for friction: what made
+const analyseTask = `%sYou are analysing a finished run of a card for friction: what made
 the run slower, costlier or harder than it needed to be. You have read-only
 tools: read, grep, glob, git (status, diff, log, show, branch) and
 report_analysis. You cannot change files, run commands or write the card.

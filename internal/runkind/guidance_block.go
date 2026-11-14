@@ -27,7 +27,8 @@ func blockMarkers(project string) (start, end string) {
 var errMalformedBlock = errors.New("guidance block markers are malformed")
 
 // withGuidance appends section to project's block in file, or adds the block.
-// Text outside the appended section is never rewritten.
+// Existing text is kept as is, except that a block-less file's trailing
+// newlines become one blank line before the new block.
 func withGuidance(file, project, section string) (string, error) {
 	start, end := blockMarkers(project)
 	section = strings.TrimRight(section, "\n")

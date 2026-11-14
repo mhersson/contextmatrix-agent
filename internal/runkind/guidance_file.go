@@ -53,7 +53,11 @@ func linkTarget(ws, name string) (string, error) {
 	dest = filepath.Clean(dest)
 
 	rel, err := filepath.Rel(root, dest)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+	if err != nil {
+		return "", fmt.Errorf("%s: relate link to the repo: %w", name, err)
+	}
+
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return "", fmt.Errorf("%s links outside the repo", name)
 	}
 
@@ -62,11 +66,21 @@ func linkTarget(ws, name string) (string, error) {
 		return "", fmt.Errorf("%s links into .git", name)
 	}
 
-	if resolved, err := filepath.EvalSymlinks(dest); err != nil || resolved != dest {
-		return "", fmt.Errorf("%s links to a missing file or through a link", name)
+	resolved, err := filepath.EvalSymlinks(dest)
+	if err != nil {
+		return "", fmt.Errorf("%s links to a missing file: %w", name, err)
 	}
 
-	if info, err := os.Lstat(dest); err != nil || !info.Mode().IsRegular() {
+	if resolved != dest {
+		return "", fmt.Errorf("%s links through a link", name)
+	}
+
+	info, err := os.Lstat(dest)
+	if err != nil {
+		return "", fmt.Errorf("stat %s link target: %w", name, err)
+	}
+
+	if !info.Mode().IsRegular() {
 		return "", fmt.Errorf("%s links to something that is not a regular file", name)
 	}
 

@@ -218,17 +218,17 @@ func TestBuildRunKindSpec(t *testing.T) {
 	t.Run("operator env names", func(t *testing.T) {
 		withExtra := NewServer(Config{
 			APIKey: "k", Executor: &fakeExecutor{}, Tracker: executor.NewTracker(1), Credentials: &fakeCredentials{},
-			LaunchEnv: LaunchEnv{BaseImage: "base:image", WorkerExtraEnv: []string{"GOFLAGS=-mod=mod", "API_TOKEN=s3cr3t-value", "BARE"}},
+			LaunchEnv: LaunchEnv{BaseImage: "base:image", WorkerExtraEnv: []string{"EXAMPLE_FLAGS=on", "API_TOKEN=s3cr3t-value", "BARE"}},
 			Logger:    quietLogger(),
 		})
 
 		for _, base := range []func() protocol.RunKindPayload{checkPayload, investigatePayload, analysePayload, guidancePRPayload} {
 			spec := withExtra.buildRunKindSpec(base(), "run-5")
 
-			assert.Contains(t, spec.Env, "CM_OPERATOR_ENV_NAMES=GOFLAGS,API_TOKEN")
+			assert.Contains(t, spec.Env, "CM_OPERATOR_ENV_NAMES=EXAMPLE_FLAGS,API_TOKEN")
 
 			for _, e := range spec.Env {
-				if e != "GOFLAGS=-mod=mod" && e != "API_TOKEN=s3cr3t-value" {
+				if e != "EXAMPLE_FLAGS=on" && e != "API_TOKEN=s3cr3t-value" {
 					assert.NotContains(t, e, "s3cr3t-value")
 				}
 			}
