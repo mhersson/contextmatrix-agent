@@ -698,6 +698,31 @@ func (g *Git) RemoteTip(ctx context.Context, branch string) (string, error) {
 	return strings.Fields(line)[0], nil
 }
 
+// RemoteHeads lists origin's branch names that start with prefix.
+func (g *Git) RemoteHeads(ctx context.Context, prefix string) ([]string, error) {
+	out, err := g.run(ctx, "ls-remote", "--heads", "origin", "refs/heads/"+prefix+"*")
+	if err != nil {
+		return nil, fmt.Errorf("remote heads %q: %w", prefix, err)
+	}
+
+	var heads []string
+
+	for line := range strings.Lines(out) {
+		f := strings.Fields(line)
+		if len(f) != 2 {
+			continue
+		}
+
+		// ls-remote matches a pattern against any ref tail, so the prefix is checked
+		// from refs/heads/ again.
+		if name, ok := strings.CutPrefix(f[1], "refs/heads/"); ok && strings.HasPrefix(name, prefix) {
+			heads = append(heads, name)
+		}
+	}
+
+	return heads, nil
+}
+
 // RemoteBranchExists reports whether branch exists on the remote at url. It
 // runs from the workspace parent, like Clone, so it works before the clone
 // exists. An unreachable remote is an error, never a false.

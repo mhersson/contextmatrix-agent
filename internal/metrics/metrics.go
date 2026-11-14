@@ -32,6 +32,7 @@ const (
 // proxy's paths arrive through New's extraEndpoints.
 var endpointAllowlist = []string{
 	"/trigger",
+	"/run-kind",
 	"/kill",
 	"/stop-all",
 	"/message",

@@ -67,7 +67,19 @@ type verifyResult struct {
 	Status verifyStatus
 	Output string
 	Note   string
+	// Skip names why a skipped run was skipped; skipNone otherwise.
+	Skip verifySkip
 }
+
+// verifySkip is the reason a verify run was skipped.
+type verifySkip int
+
+const (
+	skipNone verifySkip = iota
+	skipTimeout
+	skipExhausted
+	skipToolMissing
+)
 
 const (
 	// defaultVerifyTimeout bounds a verify run when the operator declared none.
@@ -209,6 +221,7 @@ func classifyVerify(plan verifyPlan, out verifyexec.Outcome) verifyResult {
 		return verifyResult{
 			Status: verifySkipped,
 			Output: out.Output,
+			Skip:   skipTimeout,
 			Note:   fmt.Sprintf("verify timed out after %s - inconclusive, treated as unverified", plan.Timeout),
 		}
 	case out.StartErr && verifyexec.LooksResourceExhausted(out.Output):
@@ -219,6 +232,7 @@ func classifyVerify(plan verifyPlan, out verifyexec.Outcome) verifyResult {
 		return verifyResult{
 			Status: verifySkipped,
 			Output: out.Output,
+			Skip:   skipExhausted,
 			Note:   "verify could not run - container resource exhaustion, treated as unverified",
 		}
 	case out.StartErr || out.ExitCode == 127 || (plan.Wrapper && verifyexec.LooksToolMissing(out.Output)):
@@ -228,6 +242,7 @@ func classifyVerify(plan verifyPlan, out verifyexec.Outcome) verifyResult {
 		return verifyResult{
 			Status: verifySkipped,
 			Output: out.Output,
+			Skip:   skipToolMissing,
 			Note:   "verify tool missing - the command could not run, treated as unverified",
 		}
 	default:
@@ -490,7 +505,22 @@ func (o *run) runVerifyPlan(ctx context.Context, dir string, plan verifyPlan) (v
 // The output is redacted before the container-runtime check, so every caller
 // classifies the same bytes.
 func (o *run) runVerifyCommand(ctx context.Context, dir string, plan verifyPlan) (verifyResult, error) {
-	out := o.runVerify(ctx, dir, plan.Argv, plan.Timeout, plan.Env)
+	log := slog.Default().With("card_id", o.d.Cfg.CardID)
+
+	return execVerifyCommand(ctx, log, o.runVerify, dir, plan, o.d.Redact)
+}
+
+// execVerifyCommand is runVerifyCommand's body with the runner and redactor
+// injected, so the check run kind shares every protection above.
+func execVerifyCommand(
+	ctx context.Context,
+	log *slog.Logger,
+	run func(context.Context, string, []string, time.Duration, []string) verifyexec.Outcome,
+	dir string,
+	plan verifyPlan,
+	redact func(string) string,
+) (verifyResult, error) {
+	out := run(ctx, dir, plan.Argv, plan.Timeout, plan.Env)
 
 	if err := ctx.Err(); err != nil {
 		return verifyResult{}, err
@@ -508,7 +538,7 @@ func (o *run) runVerifyCommand(ctx context.Context, dir string, plan verifyPlan)
 		// defect whose output happens to say e.g. "too many open files" is an
 		// accepted false positive here - one bounded duplicate run, and
 		// classification is unaffected since a failure stays a failure either way.
-		slog.Warn("verify: output looks resource-exhausted; retrying once", "card_id", o.d.Cfg.CardID)
+		log.Warn("verify: output looks resource-exhausted; retrying once")
 
 		select {
 		case <-ctx.Done():
@@ -516,7 +546,7 @@ func (o *run) runVerifyCommand(ctx context.Context, dir string, plan verifyPlan)
 		case <-time.After(verifyRetryWait):
 		}
 
-		out = o.runVerify(ctx, dir, plan.Argv, plan.Timeout, plan.Env)
+		out = run(ctx, dir, plan.Argv, plan.Timeout, plan.Env)
 
 		if err := ctx.Err(); err != nil {
 			return verifyResult{}, err
@@ -525,8 +555,8 @@ func (o *run) runVerifyCommand(ctx context.Context, dir string, plan verifyPlan)
 		res = classifyVerify(plan, out)
 	}
 
-	if o.d.Redact != nil {
-		res.Output = o.d.Redact(res.Output)
+	if redact != nil {
+		res.Output = redact(res.Output)
 	}
 
 	// A non-pass whose output carries an unreachable-container-runtime
@@ -543,7 +573,7 @@ func (o *run) runVerifyCommand(ctx context.Context, dir string, plan verifyPlan)
 	// error: the park reason is fixed, so it cannot leak whatever the verify
 	// command printed.
 	if res.Status != verifyPassed && verifyexec.LooksContainerRuntimeUnavailable(res.Output) {
-		return verifyResult{}, &ToolchainMissingError{
+		return verifyResult{Output: res.Output}, &ToolchainMissingError{
 			Tier:    "runtime",
 			Subject: containerRuntimeUnavailableMarker,
 			Reason:  "the verify command needs a container runtime, and the worker has none by design",
@@ -556,9 +586,25 @@ func (o *run) runVerifyCommand(ctx context.Context, dir string, plan verifyPlan)
 // verifyTimeout is the run's verify timeout: the operator's declared value
 // clamped to [30s, 2h], or the default when none was declared.
 func (o *run) verifyTimeout() time.Duration {
+	if d := o.d.Cfg.Verify; d != nil {
+		return clampDeclaredTimeout(d.Timeout)
+	}
+
+	return clampDeclaredTimeout(0)
+}
+
+// ClampVerifyTimeout turns a declared timeout in seconds into the gate's
+// duration: 0 is the default, anything else is clamped to [30s, 2h].
+func ClampVerifyTimeout(seconds int) time.Duration {
+	return clampDeclaredTimeout(time.Duration(seconds) * time.Second)
+}
+
+// clampDeclaredTimeout keeps sub-second precision, so a tiny declared value
+// clamps to the floor instead of truncating to the default.
+func clampDeclaredTimeout(declared time.Duration) time.Duration {
 	t := defaultVerifyTimeout
-	if d := o.d.Cfg.Verify; d != nil && d.Timeout > 0 {
-		t = d.Timeout
+	if declared > 0 {
+		t = declared
 	}
 
 	return min(max(t, minVerifyTimeout), maxVerifyTimeout)

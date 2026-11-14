@@ -6,9 +6,9 @@ see [`README.md`](README.md).
 
 ContextMatrix Agent is a Go agent harness that runs as ContextMatrix's **task
 backend**. One binary, two roles: **`serve`** hosts CM lifecycle webhooks and
-launches one Docker worker container per card; **`work`** is the container
-entrypoint that clones the target repo, claims the card, drives the harness
-(HITL or autonomous), then commits, pushes, and reports back. It edits target
+launches one Docker worker container per card and per run kind; **`work`** is
+the container entrypoint that clones the target repo, claims the card, drives
+the harness (HITL or autonomous), then commits, pushes, and reports back. It edits target
 repositories but treats ContextMatrix - reached over MCP - as the source of
 truth for card state. Backend selection lives in ContextMatrix, not here.
 
@@ -24,12 +24,13 @@ Read the relevant one before working in its area:
 | `docs/secrets.md`         | Credential staging, the LLM proxy, env scrubbing, redaction, `verify.env` pass-throughs.                         |
 | `docs/observability.md`   | Prometheus metrics and the admin listener.                                                                       |
 | `docs/custom-images.md`   | Custom worker images and `CMX_READ_ONLY_ROOTS`.                                                                  |
+| `docs/run-kinds.md`       | Run kinds: `POST /run-kind`, keying, kill and listing, credentials, inputs, the terminal status.                 |
 
 ## Channels to ContextMatrix
 
 | Channel            | Direction    | Transport                          | Carries                                                                                |
 | ------------------ | ------------ | ---------------------------------- | -------------------------------------------------------------------------------------- |
-| Lifecycle webhooks | CM → `serve` | HMAC over `contextmatrix-protocol` | trigger / kill / stop-all / message / promote / end-session                            |
+| Lifecycle webhooks | CM → `serve` | HMAC over `contextmatrix-protocol` | trigger / run-kind / kill / stop-all / message / promote / end-session                 |
 | Status callbacks   | `serve` → CM | HMAC, `POST /api/agent/status`     | running / completed / failed, each with the run id; a terminal one with the stop cause |
 | Card operations    | `work` → CM  | **MCP tools** (`CM_MCP_API_KEY`)   | claim, heartbeat, report_usage, set phase, transition, complete, …                     |
 
@@ -56,13 +57,16 @@ internal/worker/       → the `work` lifecycle: clone, claim, run the FSM (HITL
 internal/executor/     → Executor interface + DockerExecutor; Tracker (concurrency + awaiting-human gate); watchdogs
 internal/attempt/      → stamps the per-card container-run ordinal onto the transcript envelope, so a restarted card's overlapping event sequences stay distinguishable
 internal/runoutcome/   → the worker's last stdout line (run_outcome): why the run ended; written by work, read by serve
+internal/cardid/       → the card ID pattern shared by work and /run-kind
+internal/runinput/     → a run kind's input dir on disk (<log_dir>/.run-inputs/<run id>/), mounted read-only at /run/cm-input
+internal/runkind/      → sandboxed run kinds: one file per kind, no MCP; entered from work when CM_RUN_KIND is set
 internal/secrets/      → Source (static env file) + RunCredentials (stages per-run CM-provisioned credentials)
 
 # serve plumbing
 internal/webhook/    → HTTP server for lifecycle webhooks; embeds backendkit's webhookcore.Core (HMAC auth, drain gate, request metrics, SSE /logs, health/readyz/images) and adds the agent-only lifecycle handlers plus /message dedup over webhookcore's DedupCache; mounts backendkit's llmproxy at /llm
 internal/callback/   → status callbacks to /api/agent/status; VerifyAutonomous (fail-closed)
 internal/cmclient/   → MCP client for CM card operations (one agent identity per card)
-internal/filelog/    → per-card raw container-output file logs (<log_dir>/<project>/<card_id>.log; always on, default ~/.contextmatrix/agent/logs; pruned after log_retention_days)
+internal/filelog/    → raw container-output file logs, one per card and one per run kind of the card (<log_dir>/<project>/<card_id>.log, <card_id>-<kind>.log; always on, default ~/.contextmatrix/agent/logs; pruned after log_retention_days); section.go copies one run's section of a card's log for investigate
 internal/metrics/    → thin wrapper over backendkit's shared metrics bundle (cm_agent_* collectors, NormalizeEndpoint label allowlist); keeps the agent-only callback-retries counter
 internal/buildinfo/  → the build /health reports: ldflags-stamped version, commit and build time plus the embedded merge history (history/merges.log, parsed by protocol's changelog)
 
@@ -263,6 +267,9 @@ Summaries only - full detail lives in the reference documents above.
     once per run. Every POC card asks for main-behaviour tests only; without
     mob review it also gets one generic reviewer, blockers-only fix requests
     and no cleanup pass. The verdict code has no POC branch.
+16. **Run kinds.** `POST /run-kind` launches sandboxed check and investigate
+    runs for a card: keyed apart from its card run, no MCP key, one status at
+    the end with the result and usage. See `docs/run-kinds.md`.
 
 ## Running and testing
 

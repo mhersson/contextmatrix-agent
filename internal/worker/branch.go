@@ -26,12 +26,17 @@ var jiraKeyPattern = regexp.MustCompile(`^[A-Z][A-Z0-9_]+-[1-9][0-9]*$`)
 // jiraKey returns the Jira issue key of a Jira-sourced card, and false when the
 // card is not from Jira or its key cannot safely name a branch.
 func jiraKey(src cmclient.CardSource) (string, bool) {
-	if src.System != jiraSourceSystem || len(src.ExternalID) > maxJiraKeyLen ||
-		!jiraKeyPattern.MatchString(src.ExternalID) {
+	if src.System != jiraSourceSystem || !BranchKey(src.ExternalID) {
 		return "", false
 	}
 
 	return src.ExternalID, true
+}
+
+// BranchKey reports whether key is a Jira issue key cardBranchName puts on a
+// card branch.
+func BranchKey(key string) bool {
+	return len(key) <= maxJiraKeyLen && jiraKeyPattern.MatchString(key)
 }
 
 // cardBranchName is the one derivation of a run's work branch. It reads only

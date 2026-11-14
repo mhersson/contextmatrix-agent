@@ -979,7 +979,7 @@ func TestSpecFromEnv_PlaybookBaseBranchVars(t *testing.T) {
 	})
 }
 
-func TestReadLLMSecretsTakesTheOAuthTokenFromTheFileOnly(t *testing.T) {
+func TestLLMValuesTakeTheOAuthTokenFromTheFileOnly(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "env")
 	require.NoError(t, os.WriteFile(path, []byte("LLM_TYPE=claude_code\nLLM_OAUTH_TOKEN=file-tok\n"), 0o600))
 
@@ -988,12 +988,12 @@ func TestReadLLMSecretsTakesTheOAuthTokenFromTheFileOnly(t *testing.T) {
 
 	t.Setenv("LLM_OAUTH_TOKEN", "env-tok")
 
-	spec := readLLMSecrets(worker.RunSpec{}, src)
-	assert.Equal(t, "file-tok", spec.LLMOAuthToken)
-	assert.Equal(t, "claude_code", spec.LLMType)
+	_, _, llmType, oauthToken, _ := llmValues(src)
+	assert.Equal(t, "file-tok", oauthToken)
+	assert.Equal(t, "claude_code", llmType)
 }
 
-func TestReadLLMSecretsTakesTheClaudeCodeEffortFromTheFileOnly(t *testing.T) {
+func TestLLMValuesTakeTheClaudeCodeEffortFromTheFileOnly(t *testing.T) {
 	tests := []struct {
 		name string
 		file string
@@ -1012,7 +1012,8 @@ func TestReadLLMSecretsTakesTheClaudeCodeEffortFromTheFileOnly(t *testing.T) {
 
 			t.Setenv("LLM_EFFORT", "low")
 
-			assert.Equal(t, tt.want, readLLMSecrets(worker.RunSpec{}, src).LLMEffort)
+			_, _, _, _, effort := llmValues(src)
+			assert.Equal(t, tt.want, effort)
 		})
 	}
 }

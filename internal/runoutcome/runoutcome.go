@@ -15,9 +15,12 @@ import (
 // Kind is the envelope kind of the outcome line.
 const Kind events.Kind = "run_outcome"
 
-// Data is the outcome line's payload.
+// Data is the outcome line's payload. Result and Usage are a run kind's; serve
+// ignores them on a card run.
 type Data struct {
-	Cause string `json:"cause,omitempty"`
+	Cause  string                  `json:"cause,omitempty"`
+	Result *protocol.RunKindResult `json:"result,omitempty"`
+	Usage  []protocol.RunUsage     `json:"usage,omitempty"`
 }
 
 // Emit writes the outcome line through the run's event emitter.
@@ -25,6 +28,14 @@ func Emit(emit *events.Emitter, d Data) {
 	data := map[string]any{}
 	if d.Cause != "" {
 		data["cause"] = d.Cause
+	}
+
+	if d.Result != nil {
+		data["result"] = d.Result
+	}
+
+	if len(d.Usage) > 0 {
+		data["usage"] = d.Usage
 	}
 
 	emit.Emit(Kind, data)

@@ -1891,3 +1891,20 @@ func TestPrepareWorkspaceRefusesCreateWithoutBase(t *testing.T) {
 	require.Error(t, err, "create base branch requested without a base branch must be refused")
 	assert.NoDirExists(t, ws)
 }
+
+func TestRemoteHeads(t *testing.T) {
+	t.Parallel()
+
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+
+	bare, ws, _ := setupClonedRepo(t)
+	for _, b := range []string{"cm/abc-12", "cm/abc-12-PROJ-7", "x/refs/heads/cm/abc-12"} {
+		pushFileToBranch(t, bare, "f.txt", b)
+	}
+
+	heads, err := NewGit(ws, "", "", "").RemoteHeads(context.Background(), "cm/abc-12")
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{"cm/abc-12", "cm/abc-12-PROJ-7"}, heads)
+}

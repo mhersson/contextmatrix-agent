@@ -591,6 +591,8 @@ Every code-resolved outcome - a command, the unverified skip, or the park - is
 also upserted as a `## Verify Command` section on the card body, so the card
 and the activity log carry the same truth.
 
+The check run kind ([run-kinds.md](run-kinds.md)) reuses this ladder's detection: it lists every runnable detection row rather than the first, applies the same accept rule to a changed command, and trial-runs one command once with the gate's run protections (cancel handling, one exhaustion retry, redaction, the container-runtime park). The gate's own behaviour is unchanged.
+
 ## HITL gates and promote
 
 HITL cards run the same FSM as autonomous, mode-gated on `Config.Interactive`:

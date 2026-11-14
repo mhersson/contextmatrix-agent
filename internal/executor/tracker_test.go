@@ -36,11 +36,11 @@ func TestTracker_Get(t *testing.T) {
 
 	require.True(t, tr.AddIfUnderLimit(r))
 
-	got, ok := tr.Get("p", "A")
+	got, ok := tr.Get(RunKey{Project: "p", CardID: "A"})
 	require.True(t, ok)
 	assert.Equal(t, "cid", got.ContainerID)
 
-	_, ok = tr.Get("p", "missing")
+	_, ok = tr.Get(RunKey{Project: "p", CardID: "missing"})
 	assert.False(t, ok)
 }
 
@@ -48,12 +48,12 @@ func TestTracker_Remove_Idempotent(t *testing.T) {
 	tr := NewTracker(5)
 	require.True(t, tr.AddIfUnderLimit(&Run{Project: "p", CardID: "A"}))
 
-	tr.Remove("p", "A")
+	tr.Remove(RunKey{Project: "p", CardID: "A"})
 	assert.Equal(t, 0, tr.Count())
 
 	// Removing again is a no-op, not a panic.
-	tr.Remove("p", "A")
-	tr.Remove("p", "never-existed")
+	tr.Remove(RunKey{Project: "p", CardID: "A"})
+	tr.Remove(RunKey{Project: "p", CardID: "never-existed"})
 	assert.Equal(t, 0, tr.Count())
 }
 
@@ -61,45 +61,45 @@ func TestTracker_RemoveClearsAuxiliaryState(t *testing.T) {
 	tr := NewTracker(5)
 	require.True(t, tr.AddIfUnderLimit(&Run{Project: "p", CardID: "A"}))
 
-	tr.SetAwaiting("p", "A", true)
-	tr.Touch("p", "A")
-	tr.Remove("p", "A")
+	tr.SetAwaiting(RunKey{Project: "p", CardID: "A"}, true)
+	tr.Touch(RunKey{Project: "p", CardID: "A"})
+	tr.Remove(RunKey{Project: "p", CardID: "A"})
 
 	// After removal the auxiliary maps are cleared too.
-	assert.False(t, tr.Awaiting("p", "A"))
-	assert.True(t, tr.LastActivity("p", "A").IsZero())
+	assert.False(t, tr.Awaiting(RunKey{Project: "p", CardID: "A"}))
+	assert.True(t, tr.LastActivity(RunKey{Project: "p", CardID: "A"}).IsZero())
 
 	// And a fresh add reuses the slot without stale awaiting state.
 	require.True(t, tr.AddIfUnderLimit(&Run{Project: "p", CardID: "A"}))
-	assert.False(t, tr.Awaiting("p", "A"))
+	assert.False(t, tr.Awaiting(RunKey{Project: "p", CardID: "A"}))
 }
 
 func TestTracker_Awaiting_SetAndClear(t *testing.T) {
 	tr := NewTracker(5)
 	require.True(t, tr.AddIfUnderLimit(&Run{Project: "p", CardID: "A"}))
 
-	assert.False(t, tr.Awaiting("p", "A"))
+	assert.False(t, tr.Awaiting(RunKey{Project: "p", CardID: "A"}))
 
-	tr.SetAwaiting("p", "A", true)
-	assert.True(t, tr.Awaiting("p", "A"))
+	tr.SetAwaiting(RunKey{Project: "p", CardID: "A"}, true)
+	assert.True(t, tr.Awaiting(RunKey{Project: "p", CardID: "A"}))
 
-	tr.SetAwaiting("p", "A", false)
-	assert.False(t, tr.Awaiting("p", "A"))
+	tr.SetAwaiting(RunKey{Project: "p", CardID: "A"}, false)
+	assert.False(t, tr.Awaiting(RunKey{Project: "p", CardID: "A"}))
 
 	// Awaiting on an untracked key is false.
-	assert.False(t, tr.Awaiting("p", "missing"))
+	assert.False(t, tr.Awaiting(RunKey{Project: "p", CardID: "missing"}))
 }
 
 func TestTracker_Touch_UpdatesLastActivity(t *testing.T) {
 	tr := NewTracker(5)
 	require.True(t, tr.AddIfUnderLimit(&Run{Project: "p", CardID: "A"}))
 
-	assert.True(t, tr.LastActivity("p", "A").IsZero())
+	assert.True(t, tr.LastActivity(RunKey{Project: "p", CardID: "A"}).IsZero())
 
 	before := time.Now()
 
-	tr.Touch("p", "A")
-	got := tr.LastActivity("p", "A")
+	tr.Touch(RunKey{Project: "p", CardID: "A"})
+	got := tr.LastActivity(RunKey{Project: "p", CardID: "A"})
 
 	assert.False(t, got.IsZero())
 	assert.False(t, got.Before(before))
@@ -176,12 +176,12 @@ func TestTracker_Touch_UntrackedRunIsNoop(t *testing.T) {
 	tr := NewTracker(5)
 	require.True(t, tr.AddIfUnderLimit(&Run{Project: "p", CardID: "A"}))
 
-	tr.Remove("p", "A")
-	tr.Touch("p", "A")
-	tr.Touch("p", "never-existed")
+	tr.Remove(RunKey{Project: "p", CardID: "A"})
+	tr.Touch(RunKey{Project: "p", CardID: "A"})
+	tr.Touch(RunKey{Project: "p", CardID: "never-existed"})
 
-	assert.True(t, tr.LastActivity("p", "A").IsZero())
-	assert.True(t, tr.LastActivity("p", "never-existed").IsZero())
+	assert.True(t, tr.LastActivity(RunKey{Project: "p", CardID: "A"}).IsZero())
+	assert.True(t, tr.LastActivity(RunKey{Project: "p", CardID: "never-existed"}).IsZero())
 }
 
 // TestTracker_SetAwaitingIgnoresAnUntrackedRun pins the guard that keeps the
@@ -193,11 +193,41 @@ func TestTracker_SetAwaitingIgnoresAnUntrackedRun(t *testing.T) {
 	tr := NewTracker(5)
 	require.True(t, tr.AddIfUnderLimit(&Run{Project: "p", CardID: "A"}))
 
-	tr.Remove("p", "A")
-	tr.SetAwaiting("p", "A", false)
-	tr.SetAwaiting("p", "never-existed", true)
+	tr.Remove(RunKey{Project: "p", CardID: "A"})
+	tr.SetAwaiting(RunKey{Project: "p", CardID: "A"}, false)
+	tr.SetAwaiting(RunKey{Project: "p", CardID: "never-existed"}, true)
 
-	assert.False(t, tr.Awaiting("p", "A"))
-	assert.False(t, tr.Awaiting("p", "never-existed"))
+	assert.False(t, tr.Awaiting(RunKey{Project: "p", CardID: "A"}))
+	assert.False(t, tr.Awaiting(RunKey{Project: "p", CardID: "never-existed"}))
 	assert.Empty(t, tr.awaiting, "a removed run leaves nothing behind in the awaiting map")
+}
+
+func TestRunKeyName(t *testing.T) {
+	assert.Equal(t, "ABC-12", RunKey{Project: "p", CardID: "ABC-12"}.Name())
+	assert.Equal(t, "ABC-12.check", RunKey{Project: "p", CardID: "ABC-12", Kind: "check"}.Name())
+}
+
+func TestTrackerKeepsRunKindsApart(t *testing.T) {
+	tr := NewTracker(3)
+	card := &Run{Project: "p", CardID: "ABC-12"}
+	check := &Run{Project: "p", CardID: "ABC-12", Kind: "check"}
+
+	assert.True(t, tr.AddIfUnderLimit(card))
+	assert.True(t, tr.AddIfUnderLimit(check))
+	assert.False(t, tr.AddIfUnderLimit(&Run{Project: "p", CardID: "ABC-12", Kind: "check"}), "one run per kind")
+
+	got, _ := tr.Get(RunKey{Project: "p", CardID: "ABC-12"})
+	assert.Same(t, card, got)
+
+	assert.True(t, tr.AddIfUnderLimit(&Run{Project: "p", CardID: "ABC-12", Kind: "investigate"}))
+	assert.False(t, tr.AddIfUnderLimit(&Run{Project: "p", CardID: "ABC-13"}), "max_concurrent is shared")
+
+	tr.SetReason(check.Key(), "killed")
+	assert.Equal(t, "killed", tr.Reason(check.Key()))
+	assert.Empty(t, tr.Reason(card.Key()))
+
+	tr.Remove(check.Key())
+
+	_, ok := tr.Get(card.Key())
+	assert.True(t, ok, "removing a run kind leaves the card run")
 }

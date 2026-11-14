@@ -8,12 +8,12 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/mhersson/contextmatrix-agent/internal/attempt"
+	"github.com/mhersson/contextmatrix-agent/internal/cardid"
 	"github.com/mhersson/contextmatrix-agent/internal/cmclient"
 	"github.com/mhersson/contextmatrix-agent/internal/config"
 	"github.com/mhersson/contextmatrix-agent/internal/runoutcome"
@@ -29,15 +29,11 @@ import (
 // cmEnvFile is the bind-mounted env file path the service injects secrets into.
 const cmEnvFile = "/run/cm-secrets/env"
 
-// cardIDPattern matches ContextMatrix card IDs (PREFIX-NNN, accepting upper-
-// and lower-case letters): a letter-led prefix of letters, digits, and dashes
-// (CM only requires the project prefix to be non-empty, so MY-PROJ-001 is a
-// legitimate ID), ending in a dash and a numeric suffix - exactly what CM's
-// server-side ID generator produces. The card ID becomes part of the cm/ work
-// branch name, so this conservative shape keeps crafted refs (colons, slashes,
-// dots, spaces, leading dashes) out of the push path entirely instead of
-// relying on git's refspec parser to reject them.
-var cardIDPattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9-]*-[0-9]+$`)
+// The bash timeout cap and tool output cap when serve sets none.
+const (
+	defaultBashTimeoutMaxSeconds = 600
+	defaultToolOutputMaxBytes    = 131072
+)
 
 // mcpCloseTimeout bounds the MCP client teardown: a slow or dead tunnel
 // must not keep a finished worker alive past the backend's kill grace -
@@ -70,6 +66,10 @@ func newWorkCmd() *cobra.Command {
 			// Correlate before any parsing so specFromEnv's own diagnostics carry the run id.
 			slog.SetDefault(withRunID(slog.Default(), os.Getenv("CM_RUN_ID")))
 
+			if kind := os.Getenv("CM_RUN_KIND"); kind != "" {
+				return runKindMain(cmd, kind)
+			}
+
 			spec, err := specFromEnv()
 			if err != nil {
 				return err
@@ -86,7 +86,7 @@ func newWorkCmd() *cobra.Command {
 			// file-only. The git token is NOT resolved from env - the credential
 			// helper re-reads CM_GIT_TOKEN from the file per git op so host-side
 			// rotation reaches a long-running worker.
-			spec = readLLMSecrets(spec, src)
+			spec.LLMKey, spec.LLMBaseURL, spec.LLMType, spec.LLMOAuthToken, spec.LLMEffort = llmValues(src)
 			spec.GitToken = src.Get("CM_GIT_TOKEN")
 
 			// Replay never applies to claude_code runs.
@@ -112,14 +112,7 @@ func newWorkCmd() *cobra.Command {
 				return finishWork(emit, worker.Result{}, err)
 			}
 
-			clientOpts := []llm.Option{llm.WithRetry(llm.DefaultRetryPolicy()), llm.WithDialect(dialectFromType(spec.LLMType))}
-			clientOpts = append(clientOpts, caLLMOpts...)
-
-			if spec.LLMBaseURL != "" {
-				clientOpts = append(clientOpts, llm.WithBaseURL(spec.LLMBaseURL))
-			}
-
-			client := llm.NewClient(spec.LLMKey, clientOpts...)
+			client := newLLMClient(spec.LLMKey, spec.LLMBaseURL, spec.LLMType, caLLMOpts)
 
 			ops, err := cmclient.New(cmd.Context(), spec.MCPURL, spec.MCPAPIKey, "cmx-agent-"+strings.ToLower(spec.CardID), caMCPOpts...)
 			if err != nil {
@@ -203,7 +196,7 @@ func specFromEnv() (worker.RunSpec, error) {
 		return worker.RunSpec{}, err
 	}
 
-	if !cardIDPattern.MatchString(cardID) {
+	if !cardid.Valid(cardID) {
 		return worker.RunSpec{}, fmt.Errorf("env var CM_CARD_ID: invalid card ID %q (want PREFIX-NNN)", cardID)
 	}
 
@@ -227,12 +220,12 @@ func specFromEnv() (worker.RunSpec, error) {
 		return worker.RunSpec{}, err
 	}
 
-	bashTimeoutMax, err := envInt("CMX_BASH_TIMEOUT_MAX_SECONDS", 600)
+	bashTimeoutMax, err := envInt("CMX_BASH_TIMEOUT_MAX_SECONDS", defaultBashTimeoutMaxSeconds)
 	if err != nil {
 		return worker.RunSpec{}, err
 	}
 
-	toolOutputMax, err := envInt("CMX_TOOL_OUTPUT_MAX_BYTES", 131072)
+	toolOutputMax, err := envInt("CMX_TOOL_OUTPUT_MAX_BYTES", defaultToolOutputMaxBytes)
 	if err != nil {
 		return worker.RunSpec{}, err
 	}
@@ -350,18 +343,6 @@ func specFromEnv() (worker.RunSpec, error) {
 		workspace = "/home/user/workspace"
 	}
 
-	var selection *protocol.SelectionContext
-
-	if raw := os.Getenv("CMX_SELECTION"); raw != "" {
-		var sc protocol.SelectionContext
-		if err := json.Unmarshal([]byte(raw), &sc); err != nil {
-			slog.Warn("CMX_SELECTION parse failed; will use default model",
-				"card_id", cardID, "project", project, "error", err)
-		} else {
-			selection = &sc
-		}
-	}
-
 	var (
 		verify    *protocol.VerifyConfig
 		verifyErr string
@@ -450,7 +431,7 @@ func specFromEnv() (worker.RunSpec, error) {
 		ReplayReasoning:           os.Getenv("CMX_REPLAY_REASONING") == "true",
 		Workspace:                 workspace,
 		CACertFile:                os.Getenv("CMX_CA_CERT_FILE"),
-		Selection:                 selection,
+		Selection:                 selectionFromEnv(cardID, project),
 		Verify:                    verify,
 		VerifyConfigError:         verifyErr,
 		ReviewAttemptsCap:         reviewAttemptsCap,
@@ -463,18 +444,35 @@ func specFromEnv() (worker.RunSpec, error) {
 	return spec, nil
 }
 
-// readLLMSecrets fills the spec's LLM values. The OAuth token is file-only:
-// only CM provisions it and only the staged value is registered for redaction,
-// so an env copy would go unmasked. The Claude Code effort is file-only too, so
-// the claude_code endpoint stays its only source.
-func readLLMSecrets(spec worker.RunSpec, src *secrets.Source) worker.RunSpec {
-	spec.LLMKey = resolveLLMValue("LLM_API_KEY", src)
-	spec.LLMBaseURL = resolveLLMValue("LLM_BASE_URL", src)
-	spec.LLMType = resolveLLMValue("LLM_TYPE", src)
-	spec.LLMOAuthToken = src.Get("LLM_OAUTH_TOKEN")
-	spec.LLMEffort = src.Get("LLM_EFFORT")
+// selectionFromEnv decodes CMX_SELECTION. An unset or unparseable value is
+// nil, so the run uses its default model.
+func selectionFromEnv(cardID, project string) *protocol.SelectionContext {
+	raw := os.Getenv("CMX_SELECTION")
+	if raw == "" {
+		return nil
+	}
 
-	return spec
+	var sc protocol.SelectionContext
+	if err := json.Unmarshal([]byte(raw), &sc); err != nil {
+		slog.Warn("CMX_SELECTION parse failed; will use default model",
+			"card_id", cardID, "project", project, "error", err)
+
+		return nil
+	}
+
+	return &sc
+}
+
+// llmValues reads a run's LLM values, for card runs and run kinds alike. The
+// OAuth token is file-only: only CM provisions it and only the staged value is
+// registered for redaction, so an env copy would go unmasked. The Claude Code
+// effort is file-only too, so the claude_code endpoint stays its only source.
+func llmValues(src *secrets.Source) (key, baseURL, llmType, oauthToken, effort string) {
+	return resolveLLMValue("LLM_API_KEY", src),
+		resolveLLMValue("LLM_BASE_URL", src),
+		resolveLLMValue("LLM_TYPE", src),
+		src.Get("LLM_OAUTH_TOKEN"),
+		src.Get("LLM_EFFORT")
 }
 
 // resolveLLMValue resolves an LLM endpoint value env-first-then-file: a
@@ -555,6 +553,19 @@ func caInjections(certPath string) ([]llm.Option, []cmclient.Option, error) {
 	httpClient := &http.Client{Transport: transport.Clone()}
 
 	return []llm.Option{llm.WithHTTPClient(httpClient)}, []cmclient.Option{cmclient.WithBaseTransport(transport)}, nil
+}
+
+// newLLMClient builds a run's LLM client: retries, the type's dialect, the
+// extra-CA options and, when set, the base URL.
+func newLLMClient(key, baseURL, llmType string, caOpts []llm.Option) *llm.Client {
+	opts := []llm.Option{llm.WithRetry(llm.DefaultRetryPolicy()), llm.WithDialect(dialectFromType(llmType))}
+	opts = append(opts, caOpts...)
+
+	if baseURL != "" {
+		opts = append(opts, llm.WithBaseURL(baseURL))
+	}
+
+	return llm.NewClient(key, opts...)
 }
 
 // dialectFromType maps the LLM_TYPE string to the harness dialect. Defaults to

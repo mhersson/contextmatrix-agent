@@ -39,17 +39,18 @@ func TestClassifyVerify(t *testing.T) {
 		out     verifyexec.Outcome
 		status  verifyStatus
 		hasNote bool
+		skip    verifySkip
 	}{
-		{"exit-zero-pass", verifyexec.Outcome{ExitCode: 0}, verifyPassed, false},
-		{"exit-one-fail", verifyexec.Outcome{ExitCode: 1, Output: "1 test failed"}, verifyFailed, false},
-		{"exit-two-fail", verifyexec.Outcome{ExitCode: 2, Output: "build error"}, verifyFailed, false},
-		{"exit-127-skip", verifyexec.Outcome{ExitCode: 127}, verifySkipped, true},
-		{"start-err-skip", verifyexec.Outcome{StartErr: true, ExitCode: -1}, verifySkipped, true},
-		{"timeout-skip", verifyexec.Outcome{TimedOut: true, ExitCode: -1}, verifySkipped, true},
+		{"exit-zero-pass", verifyexec.Outcome{ExitCode: 0}, verifyPassed, false, skipNone},
+		{"exit-one-fail", verifyexec.Outcome{ExitCode: 1, Output: "1 test failed"}, verifyFailed, false, skipNone},
+		{"exit-two-fail", verifyexec.Outcome{ExitCode: 2, Output: "build error"}, verifyFailed, false, skipNone},
+		{"exit-127-skip", verifyexec.Outcome{ExitCode: 127}, verifySkipped, true, skipToolMissing},
+		{"start-err-skip", verifyexec.Outcome{StartErr: true, ExitCode: -1}, verifySkipped, true, skipToolMissing},
+		{"timeout-skip", verifyexec.Outcome{TimedOut: true, ExitCode: -1}, verifySkipped, true, skipTimeout},
 		// A non-wrapper command whose output prints a not-found line is a REAL
 		// failure - the tool-missing heuristic is not consulted for it.
-		{"non-wrapper-not-found-stays-fail", verifyexec.Outcome{ExitCode: 2, Output: "make: cargo: command not found"}, verifyFailed, false},
-		{"printed-not-found-stays-fail", verifyexec.Outcome{ExitCode: 1, Output: "FAIL: asserted 'command not found'"}, verifyFailed, false},
+		{"non-wrapper-not-found-stays-fail", verifyexec.Outcome{ExitCode: 2, Output: "make: cargo: command not found"}, verifyFailed, false, skipNone},
+		{"printed-not-found-stays-fail", verifyexec.Outcome{ExitCode: 1, Output: "FAIL: asserted 'command not found'"}, verifyFailed, false, skipNone},
 	}
 
 	for _, tt := range tests {
@@ -57,6 +58,7 @@ func TestClassifyVerify(t *testing.T) {
 			res := classifyVerify(plan, tt.out)
 			assert.Equal(t, tt.status, res.Status)
 			assert.Equal(t, tt.hasNote, res.Note != "", "note=%q", res.Note)
+			assert.Equal(t, tt.skip, res.Skip)
 		})
 	}
 }

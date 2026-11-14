@@ -166,3 +166,23 @@ CM-provisioned secret a run receives MUST be registered with the bridge's
 `logbridge.RedactorRegistry` before launch and unregistered when the run ends.
 The `claude_code` subscription token is registered with the session redactor
 and with the worker's run redactor. Mechanics in the `serve.go` and `admitAndLaunch` doc comments.
+
+## Run kinds
+
+A [run kind](run-kinds.md) gets no MCP key or URL: its payload has no key
+field, `serve` sets neither `CM_MCP_URL` nor `CM_MCP_API_KEY`, and it never
+falls back to the configured `mcp_api_key` as a card run does. Its git token is
+staged into its own per-run dir, `<secrets_dir>/runs/<project>/<card>-<kind>/`,
+once: the payload carries no expiry, so no refresh loop runs. An `investigate`
+run gets the [LLM proxy](#llm-proxy)'s stand-in token, or the
+[Claude Code token](#claude-code-token), exactly as a card run does; a `check`
+registers nothing with the proxy and stages no LLM values.
+
+Its inputs are not secrets. They live in their own dir on disk,
+`<log_dir>/.run-inputs/<run id>/`, mounted read-only at `/run/cm-input`, never
+beside the env file in the secrets dir.
+
+Before launch, `serve` registers the run's git token, its proxy token and the
+endpoint's API key or subscription token with the host-side redactor under the
+run's own session id, as for a card run; there is no MCP key to register, and
+`worker_extra_env` stays unregistered as it does for card runs.

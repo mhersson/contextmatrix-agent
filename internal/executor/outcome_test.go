@@ -128,16 +128,16 @@ func TestTrackerReason(t *testing.T) {
 	run := &Run{Project: "p", CardID: "C-1"}
 	require.True(t, tr.AddIfUnderLimit(run))
 
-	assert.Empty(t, tr.Reason("p", "C-1"), "no reason recorded yet")
+	assert.Empty(t, tr.Reason(RunKey{Project: "p", CardID: "C-1"}), "no reason recorded yet")
 
-	tr.SetReason("p", "C-1", metrics.OutcomeKilled)
-	assert.Equal(t, metrics.OutcomeKilled, tr.Reason("p", "C-1"))
+	tr.SetReason(RunKey{Project: "p", CardID: "C-1"}, metrics.OutcomeKilled)
+	assert.Equal(t, metrics.OutcomeKilled, tr.Reason(RunKey{Project: "p", CardID: "C-1"}))
 
 	// Remove clears the reason.
-	tr.Remove("p", "C-1")
-	assert.Empty(t, tr.Reason("p", "C-1"))
+	tr.Remove(RunKey{Project: "p", CardID: "C-1"})
+	assert.Empty(t, tr.Reason(RunKey{Project: "p", CardID: "C-1"}))
 
 	// SetReason on an absent run is a no-op (no dangling entry).
-	tr.SetReason("p", "ghost", metrics.OutcomeIdleTimeout)
-	assert.Empty(t, tr.Reason("p", "ghost"))
+	tr.SetReason(RunKey{Project: "p", CardID: "ghost"}, metrics.OutcomeIdleTimeout)
+	assert.Empty(t, tr.Reason(RunKey{Project: "p", CardID: "ghost"}))
 }

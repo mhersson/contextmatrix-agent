@@ -2588,3 +2588,29 @@ func TestPlanPhaseEmptyReplyStreakTakesRepairTurn(t *testing.T) {
 	require.NoError(t, runPlanIsolated(context.Background(), newRun(t.Context(), planTestDeps(ops, llmFake), ops.taskContext)))
 	assert.Len(t, ops.createCardArgs, 1)
 }
+
+func TestDecisionModel(t *testing.T) {
+	withReviewer := func(prior float64) *registry.Registry {
+		return registry.NewRegistryFromParts(
+			llm.Catalog{{ID: "strong/reviewer", ContextLength: 200000, SupportedParameters: []string{"tools"}}},
+			registry.Priors{Models: map[string]registry.PriorEntry{
+				"strong/reviewer": {Reviewer: &prior},
+			}}, nil, nil, "capable/default")
+	}
+
+	tests := []struct {
+		name string
+		reg  *registry.Registry
+		want string
+	}{
+		{"no registry", nil, "base/model"},
+		{"the pick is at its bar", withReviewer(0.88), "strong/reviewer"},
+		{"the pick is below its bar", withReviewer(0.70), "base/model"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, DecisionModel(tt.reg, "base/model"))
+		})
+	}
+}

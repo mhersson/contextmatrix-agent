@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -21,6 +22,7 @@ import (
 
 	"github.com/mhersson/contextmatrix-agent/internal/executor"
 	"github.com/mhersson/contextmatrix-agent/internal/metrics"
+	"github.com/mhersson/contextmatrix-agent/internal/runinput"
 	"github.com/mhersson/contextmatrix-agent/internal/secrets"
 	"github.com/mhersson/contextmatrix-backendkit/frames"
 	"github.com/mhersson/contextmatrix-backendkit/llmproxy"
@@ -69,6 +71,7 @@ type fakeExecutor struct {
 	killErr        error
 	launched       []executor.LaunchSpec
 	killed         [][2]string // project, cardID
+	killedKeys     []executor.RunKey
 	stopAllArg     string
 	stopAllResults []executor.StopResult
 
@@ -99,9 +102,10 @@ func (f *fakeExecutor) Launch(ctx context.Context, spec executor.LaunchSpec) err
 	// a full tracker) is refused with ErrCapacity and the launch never happens.
 	if f.tracker != nil {
 		admitted := f.tracker.AddIfUnderLimit(&executor.Run{
-			ContainerID: "ctr-" + spec.CardID,
+			ContainerID: "ctr-" + spec.Key().Name(),
 			CardID:      spec.CardID,
 			Project:     spec.Project,
+			Kind:        spec.Kind,
 			StartedAt:   time.Now(),
 			Stdin:       &nopWriteCloser{},
 		})
@@ -115,22 +119,23 @@ func (f *fakeExecutor) Launch(ctx context.Context, spec executor.LaunchSpec) err
 	return nil
 }
 
-func (f *fakeExecutor) Kill(_ context.Context, project, cardID string) error {
+func (f *fakeExecutor) Kill(_ context.Context, k executor.RunKey) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
-	f.killed = append(f.killed, [2]string{project, cardID})
+	f.killed = append(f.killed, [2]string{k.Project, k.CardID})
+	f.killedKeys = append(f.killedKeys, k)
 
 	if f.killErr != nil {
 		return f.killErr
 	}
 
 	if f.tracker != nil {
-		if _, ok := f.tracker.Get(project, cardID); !ok {
-			return fmt.Errorf("%w: %s/%s", executor.ErrNotFound, project, cardID)
+		if _, ok := f.tracker.Get(k); !ok {
+			return fmt.Errorf("%w: %s/%s", executor.ErrNotFound, k.Project, k.CardID)
 		}
 
-		f.tracker.Remove(project, cardID)
+		f.tracker.Remove(k)
 	}
 
 	return nil
@@ -399,16 +404,19 @@ func (e *errWriteCloser) Close() error { return nil }
 // ---- harness ----------------------------------------------------------------
 
 type harness struct {
-	server   *Server
-	exec     *fakeExecutor
-	tracker  *executor.Tracker
-	reporter *fakeReporter
-	verifier *fakeVerifier
-	creds    *fakeCredentials
-	proxy    *fakeLLMProxy
-	hub      *logbridge.Hub
-	images   *fakeImageLister
-	draining *atomic.Bool
+	server    *Server
+	sections  *fakeSections
+	exec      *fakeExecutor
+	tracker   *executor.Tracker
+	reporter  *fakeReporter
+	verifier  *fakeVerifier
+	creds     *fakeCredentials
+	proxy     *fakeLLMProxy
+	sessions  *fakeSessionSecretRegistry
+	inputRoot string
+	hub       *logbridge.Hub
+	images    *fakeImageLister
+	draining  *atomic.Bool
 }
 
 func newHarness(t *testing.T, maxConcurrent int) *harness {
@@ -420,21 +428,27 @@ func newHarness(t *testing.T, maxConcurrent int) *harness {
 	verifier := &fakeVerifier{autonomous: true}
 	creds := &fakeCredentials{}
 	proxy := &fakeLLMProxy{}
+	sessions := newFakeSessionSecretRegistry()
+	inputRoot := filepath.Join(t.TempDir(), ".run-inputs")
+	sections := &fakeSections{body: []byte("log\n")}
 	hub := logbridge.NewHub(func(e protocol.LogEntry) string { return e.Project }, nil)
 	images := &fakeImageLister{}
 	draining := &atomic.Bool{}
 
 	server := NewServer(Config{
-		APIKey:        testAPIKey,
-		Skew:          protocol.DefaultMaxClockSkew,
-		MaxConcurrent: maxConcurrent,
-		Executor:      exec,
-		Tracker:       tracker,
-		Hub:           hub,
-		Reporter:      reporter,
-		Verifier:      verifier,
-		Credentials:   creds,
-		LLMProxy:      proxy,
+		APIKey:         testAPIKey,
+		Skew:           protocol.DefaultMaxClockSkew,
+		MaxConcurrent:  maxConcurrent,
+		Executor:       exec,
+		Tracker:        tracker,
+		Hub:            hub,
+		Reporter:       reporter,
+		Verifier:       verifier,
+		Credentials:    creds,
+		SessionSecrets: sessions,
+		LLMProxy:       proxy,
+		RunInputs:      runinput.New(inputRoot, quietLogger()),
+		Sections:       sections,
 		LaunchEnv: LaunchEnv{
 			BaseImage:               "base:image",
 			MCPURL:                  "http://cm:8080/mcp",
@@ -449,16 +463,19 @@ func newHarness(t *testing.T, maxConcurrent int) *harness {
 	})
 
 	return &harness{
-		server:   server,
-		exec:     exec,
-		tracker:  tracker,
-		reporter: reporter,
-		verifier: verifier,
-		creds:    creds,
-		proxy:    proxy,
-		hub:      hub,
-		images:   images,
-		draining: draining,
+		server:    server,
+		exec:      exec,
+		tracker:   tracker,
+		reporter:  reporter,
+		verifier:  verifier,
+		creds:     creds,
+		proxy:     proxy,
+		sessions:  sessions,
+		sections:  sections,
+		inputRoot: inputRoot,
+		hub:       hub,
+		images:    images,
+		draining:  draining,
 	}
 }
 
@@ -509,11 +526,17 @@ func (h *harness) request(t *testing.T, method, target string, payload any, ts s
 // addRun directly registers a tracked run with a capturable stdin, simulating a
 // container the executor already launched.
 func (h *harness) addRun(cardID, project string) *nopWriteCloser {
+	return h.addRunKind(cardID, project, "")
+}
+
+// addRunKind tracks a run of the given kind; an empty kind is the card run.
+func (h *harness) addRunKind(cardID, project, kind string) *nopWriteCloser {
 	stdin := &nopWriteCloser{}
 	h.tracker.AddIfUnderLimit(&executor.Run{
-		ContainerID: "ctr-" + cardID,
+		ContainerID: "ctr-" + executor.RunKey{CardID: cardID, Kind: kind}.Name(),
 		CardID:      cardID,
 		Project:     project,
+		Kind:        kind,
 		StartedAt:   time.Now(),
 		Stdin:       stdin,
 	})
@@ -524,8 +547,8 @@ func (h *harness) addRun(cardID, project string) *nopWriteCloser {
 // launchNow admits and launches spec synchronously, as the goroutine
 // handleTrigger starts would.
 func (s *Server) launchNow(spec executor.LaunchSpec, p protocol.TriggerPayload) {
-	adm, ctx := s.beginAdmission(context.Background(), p.Project, p.CardID)
-	s.launch(ctx, adm, spec, p)
+	adm, ctx := s.beginAdmission(context.Background(), executor.RunKey{Project: p.Project, CardID: p.CardID})
+	s.launch(ctx, adm, s.cardLaunchRequest(p, spec))
 }
 
 // awaitStatuses waits for n status callbacks; launch reports only after
@@ -718,7 +741,7 @@ func TestTrigger_MintsDistinctCorrelationIDsAcrossReTriggers(t *testing.T) {
 	// entry) so a re-trigger of the same card is admitted. A distinct
 	// timestamp (a real retry carries a fresh one) keeps the two identical
 	// payloads from colliding in the replay cache.
-	h.tracker.Remove("proj", "PROJ-MINT")
+	h.tracker.Remove(executor.RunKey{Project: "proj", CardID: "PROJ-MINT"})
 
 	w = h.doAt(t, http.MethodPost, "/trigger", payload, strconv.FormatInt(ts+1, 10))
 	require.Equal(t, http.StatusAccepted, w.Code)
@@ -754,7 +777,7 @@ func TestTrigger_SuppliedCorrelationIDIsNamespacedNotTrusted(t *testing.T) {
 		return len(h.exec.launchedSpecs()) == 1
 	}, time.Second, 5*time.Millisecond)
 
-	h.tracker.Remove("proj", "PROJ-NAMESPACED")
+	h.tracker.Remove(executor.RunKey{Project: "proj", CardID: "PROJ-NAMESPACED"})
 
 	// A distinct timestamp (a real retry carries a fresh one) keeps the two
 	// identical payloads from colliding in the replay cache. This time the
@@ -880,7 +903,7 @@ func TestTriggerRegistersPayloadEndpointUnderRunID(t *testing.T) {
 	h.awaitStatuses(t, 1)
 
 	// The first run exits; a fresh timestamp keeps the replay cache out of it.
-	h.tracker.Remove("proj", "PROJ-RUNKEY")
+	h.tracker.Remove(executor.RunKey{Project: "proj", CardID: "PROJ-RUNKEY"})
 
 	w = h.doAt(t, http.MethodPost, "/trigger", payload, strconv.FormatInt(ts+1, 10))
 	require.Equal(t, http.StatusAccepted, w.Code)
@@ -1113,6 +1136,42 @@ func TestKill_ExecutorErrorReturns500(t *testing.T) {
 	assert.Equal(t, protocol.CodeInternal, decodeErr(t, w).Code)
 }
 
+func TestKillScopesByKind(t *testing.T) {
+	card := executor.RunKey{Project: "proj", CardID: "PROJ-012"}
+	check := executor.RunKey{Project: "proj", CardID: "PROJ-012", Kind: "check"}
+
+	tests := []struct {
+		name string
+		kind string
+		want executor.RunKey
+	}{
+		{name: "no kind kills the card run only", want: card},
+		{name: "a kind kills that run kind only", kind: "check", want: check},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newHarness(t, 4)
+			h.addRun("PROJ-012", "proj")
+			h.addRunKind("PROJ-012", "proj", "check")
+
+			w := h.do(t, http.MethodPost, "/kill",
+				protocol.KillPayload{CardID: "PROJ-012", Project: "proj", Kind: tt.kind})
+			require.Equal(t, http.StatusOK, w.Code)
+
+			h.exec.mu.Lock()
+			assert.Equal(t, []executor.RunKey{tt.want}, h.exec.killedKeys)
+			h.exec.mu.Unlock()
+
+			_, cardTracked := h.tracker.Get(card)
+			_, checkTracked := h.tracker.Get(check)
+
+			assert.Equal(t, tt.want != card, cardTracked)
+			assert.Equal(t, tt.want != check, checkTracked)
+		})
+	}
+}
+
 // ---- stop-all ---------------------------------------------------------------
 
 func TestStopAll_ReturnsResults(t *testing.T) {
@@ -1215,7 +1274,7 @@ func TestStopAllReportsFailures(t *testing.T) {
 func TestMessage_WritesFrameAnd202(t *testing.T) {
 	h := newHarness(t, 4)
 	stdin := h.addRun("PROJ-001", "proj")
-	h.tracker.SetAwaiting("proj", "PROJ-001", true)
+	h.tracker.SetAwaiting(executor.RunKey{Project: "proj", CardID: "PROJ-001"}, true)
 
 	payload := protocol.MessagePayload{
 		CardID:    "PROJ-001",
@@ -1237,7 +1296,7 @@ func TestMessage_WritesFrameAnd202(t *testing.T) {
 	assert.Equal(t, "hello worker", frame.Content)
 	assert.Equal(t, "m1", frame.MessageID)
 
-	assert.False(t, h.tracker.Awaiting("proj", "PROJ-001"), "awaiting cleared after message")
+	assert.False(t, h.tracker.Awaiting(executor.RunKey{Project: "proj", CardID: "PROJ-001"}), "awaiting cleared after message")
 }
 
 // TestMessage_PublishesUnredactedUserEntry pins publishUser's only remaining
@@ -1353,7 +1412,7 @@ func TestMessage_WriteFailureRetryDelivers(t *testing.T) {
 	assert.Equal(t, protocol.CodeInternal, decodeErr(t, w1).Code)
 
 	// The container is replaced by a healthy one (same card) before the retry.
-	h.tracker.Remove("proj", "PROJ-001")
+	h.tracker.Remove(executor.RunKey{Project: "proj", CardID: "PROJ-001"})
 	healthy := h.addRun("PROJ-001", "proj")
 
 	// Retry with the SAME message_id: must NOT be deduped - it must deliver.
@@ -1608,6 +1667,25 @@ func TestEndSession_UntrackedReturns200(t *testing.T) {
 }
 
 // ---- containers -------------------------------------------------------------
+
+func TestContainersListsTheKind(t *testing.T) {
+	h := newHarness(t, 4)
+	h.addRun("PROJ-012", "proj")
+	h.addRunKind("PROJ-012", "proj", "check")
+
+	w := h.do(t, http.MethodGet, "/containers", nil)
+	require.Equal(t, http.StatusOK, w.Code)
+
+	var resp protocol.ListContainersResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+
+	kinds := map[string]string{}
+	for _, item := range resp.Containers {
+		kinds[item.ContainerID] = item.Kind
+	}
+
+	assert.Equal(t, map[string]string{"ctr-PROJ-012": "", "ctr-PROJ-012.check": "check"}, kinds)
+}
 
 func TestContainers_ListsTrackedRuns(t *testing.T) {
 	h := newHarness(t, 4)
@@ -2862,12 +2940,13 @@ func TestRunEndpointCarriesMobGuests(t *testing.T) {
 	})
 
 	t.Run("guests marshal alongside the llm endpoint", func(t *testing.T) {
-		e := s.runEndpoint(protocol.TriggerPayload{
+		req := s.cardLaunchRequest(protocol.TriggerPayload{
 			Mob: &protocol.MobSpec{
 				Participants: 3,
 				Guests:       []protocol.GuestSpec{{Name: "laptop", URL: "http://10.0.0.5:8484", Token: "guest-secret"}},
 			},
-		}, protocol.LLMEndpoint{Type: "openai", BaseURL: testLLMBaseURL, APIKey: "tok-run"})
+		}, executor.LaunchSpec{})
+		e := s.runEndpoint(req, protocol.LLMEndpoint{Type: "openai", BaseURL: testLLMBaseURL, APIKey: "tok-run"})
 
 		assert.Equal(t, "tok-run", e.APIKey)
 		assert.JSONEq(t,
@@ -2876,7 +2955,7 @@ func TestRunEndpointCarriesMobGuests(t *testing.T) {
 	})
 
 	t.Run("no guests yields empty string", func(t *testing.T) {
-		e := s.runEndpoint(protocol.TriggerPayload{Mob: &protocol.MobSpec{Participants: 3}}, protocol.LLMEndpoint{})
+		e := s.runEndpoint(s.cardLaunchRequest(protocol.TriggerPayload{Mob: &protocol.MobSpec{Participants: 3}}, executor.LaunchSpec{}), protocol.LLMEndpoint{})
 		assert.Empty(t, e.MobGuests)
 	})
 }

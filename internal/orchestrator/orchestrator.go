@@ -681,7 +681,7 @@ func newRun(ctx context.Context, d Deps, tc cmclient.TaskContext) *run {
 		push:       true,
 	}
 
-	grounding := groundingBlock(discoverGrounding(ctx, d.Cfg.Workspace))
+	grounding := Grounding(ctx, d.Cfg.Workspace)
 	if d.Redact != nil {
 		// The seed prompt is NOT covered by the harness redactor (it masks only
 		// tool output/events), so a secret reaching the grounding block would go to

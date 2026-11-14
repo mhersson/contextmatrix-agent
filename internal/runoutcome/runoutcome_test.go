@@ -23,6 +23,25 @@ func TestEmitThenParse(t *testing.T) {
 	assert.Equal(t, protocol.StopCauseVerifyParked, d.Cause)
 }
 
+func TestEmitCarriesResultAndUsage(t *testing.T) {
+	var out bytes.Buffer
+
+	want := runoutcome.Data{
+		Cause:  protocol.StopCauseDone,
+		Result: &protocol.RunKindResult{Check: &protocol.CheckResult{Candidates: []string{"./ci/verify"}}},
+		Usage: []protocol.RunUsage{{
+			Model:         "vendor/model-a",
+			LogTokenUsage: protocol.LogTokenUsage{InputTokens: 10, OutputTokens: 2, CostUSD: 0.01},
+		}},
+	}
+
+	runoutcome.Emit(events.NewEmitter(io.Discard, &out), want)
+
+	got, ok := runoutcome.Parse(bytes.TrimSpace(out.Bytes()))
+	require.True(t, ok)
+	assert.Equal(t, want, got)
+}
+
 func TestParseRejectsOtherLines(t *testing.T) {
 	for _, line := range []string{
 		`{"kind":"text","data":{"cause":"done"}}`,

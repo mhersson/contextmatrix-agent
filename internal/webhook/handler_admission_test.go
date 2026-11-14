@@ -55,7 +55,7 @@ func (s *Server) stopRequested(project, cardID string) bool {
 	defer s.admissionsMu.Unlock()
 
 	for adm := range s.admissions {
-		if adm.project == project && adm.cardID == cardID && adm.stopped {
+		if adm.key == (executor.RunKey{Project: project, CardID: cardID}) && adm.stopped {
 			return true
 		}
 	}
@@ -200,7 +200,7 @@ func TestStopDuringAdmission(t *testing.T) {
 				assert.Contains(t, h.creds.teardownCalls(), [3]string{"proj", "PROJ-STOP", runKey},
 					"the credentials are torn down before the answer")
 
-				_, tracked := h.tracker.Get("proj", "PROJ-STOP")
+				_, tracked := h.tracker.Get(executor.RunKey{Project: "proj", CardID: "PROJ-STOP"})
 				assert.False(t, tracked, "no run is left tracked")
 
 				if ordering.launched {
@@ -289,7 +289,7 @@ func TestStopAllSparesOtherProjectsAdmissions(t *testing.T) {
 	assert.Never(t, func() bool { return len(h.reporter.statuses()) > 1 },
 		50*time.Millisecond, 5*time.Millisecond, "the stopped project's launch reports nothing")
 
-	_, tracked := h.tracker.Get("other", "OTHER-1")
+	_, tracked := h.tracker.Get(executor.RunKey{Project: "other", CardID: "OTHER-1"})
 	assert.True(t, tracked)
 }
 
@@ -341,4 +341,45 @@ func TestLaunchTimeoutFailsAndFreesTheCard(t *testing.T) {
 		require.Len(t, statuses, 2)
 		assert.Equal(t, "running", statuses[1][1])
 	})
+}
+
+// TestKillStopsOnlyTheMatchingKindAdmission: a kill without a kind leaves a run
+// kind's in-flight admission alone, and a kill with the kind stops it and
+// leaves the card run's.
+func TestKillStopsOnlyTheMatchingKindAdmission(t *testing.T) {
+	card := executor.RunKey{Project: "proj", CardID: "PROJ-012"}
+	check := executor.RunKey{Project: "proj", CardID: "PROJ-012", Kind: "check"}
+
+	tests := []struct {
+		name        string
+		kind        string
+		wantStopped executor.RunKey
+		wantKept    executor.RunKey
+	}{
+		{name: "no kind", wantStopped: card, wantKept: check},
+		{name: "kind", kind: "check", wantStopped: check, wantKept: card},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newHarness(t, 4)
+			stopped, stoppedCtx := h.server.beginAdmission(context.Background(), tt.wantStopped)
+			kept, keptCtx := h.server.beginAdmission(context.Background(), tt.wantKept)
+
+			go func() {
+				<-stoppedCtx.Done()
+				h.server.endAdmission(stopped)
+				close(stopped.done)
+			}()
+
+			w := h.do(t, http.MethodPost, "/kill",
+				protocol.KillPayload{CardID: "PROJ-012", Project: "proj", Kind: tt.kind})
+			require.Equal(t, http.StatusOK, w.Code)
+
+			require.Error(t, stoppedCtx.Err())
+			require.NoError(t, keptCtx.Err())
+
+			h.server.endAdmission(kept)
+		})
+	}
 }

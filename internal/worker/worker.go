@@ -259,7 +259,7 @@ func Run(ctx context.Context, spec RunSpec, ops CardOps, client llm.LLM, emit *e
 
 	ws := filepath.Join(spec.Workspace, strings.ToLower(spec.CardID))
 
-	git := NewGit(ws, secretsPathForAuth(spec), hostFromRepoURL(spec.RepoURL), spec.CACertFile)
+	git := NewGit(ws, secretsPathForAuth(spec), HostFromRepoURL(spec.RepoURL), spec.CACertFile)
 
 	if claudeCodeMode(spec) {
 		if spec.LLMOAuthToken == "" {
@@ -499,7 +499,7 @@ func runFSM(ctx context.Context, runCtx context.Context, a fsmArgs) (Result, err
 		Ops: a.ops,
 		Git: a.git,
 		GitForDir: func(dir string) orchestrator.GitOps {
-			return NewGit(dir, secretsPathForAuth(a.spec), hostFromRepoURL(a.spec.RepoURL), a.spec.CACertFile)
+			return NewGit(dir, secretsPathForAuth(a.spec), HostFromRepoURL(a.spec.RepoURL), a.spec.CACertFile)
 		},
 		PR:         pr,
 		PRGates:    pr,
@@ -1200,11 +1200,17 @@ func buildRegistry(spec RunSpec) (*registry.Registry, []registry.LadderFault) {
 
 // capableDefault is the capable default buildRegistry resolves.
 func capableDefault(spec RunSpec) string {
+	return CapableDefault(spec.Model, spec.DefaultModel)
+}
+
+// CapableDefault is the payload's model, else the serve default, else the
+// built-in capable default.
+func CapableDefault(model, defaultModel string) string {
 	switch {
-	case spec.Model != "":
-		return spec.Model
-	case spec.DefaultModel != "":
-		return spec.DefaultModel
+	case model != "":
+		return model
+	case defaultModel != "":
+		return defaultModel
 	default:
 		return config.DefaultCapableModel
 	}

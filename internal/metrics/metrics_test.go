@@ -76,7 +76,7 @@ func TestNormalizeEndpoint(t *testing.T) {
 	m := metrics.New()
 
 	allowed := []string{
-		"/trigger", "/kill", "/stop-all", "/message", "/promote",
+		"/trigger", "/run-kind", "/kill", "/stop-all", "/message", "/promote",
 		"/end-session", "/containers", "/logs", "/health", "/readyz", "/metrics",
 	}
 	for _, p := range allowed {

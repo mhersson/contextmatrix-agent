@@ -135,7 +135,7 @@ func (o *run) proposeVerify(ctx context.Context) (verifyPlan, error) {
 	// A proposed command is metachar-free and runs as PLAIN ARGV, never a shell -
 	// so a substitution/pipeline from attacker-influenced convention docs cannot
 	// reach bash -c. Probe argv[0] directly.
-	argv, ok := acceptProposedCommand(cmd)
+	argv, ok := AcceptProposedCommand(cmd)
 	if !ok {
 		return verifyPlan{}, nil
 	}
@@ -178,13 +178,13 @@ func parseProposedCommand(output string) (string, bool) {
 	return cmd, cmd != ""
 }
 
-// acceptProposedCommand validates a model-proposed command and splits it into a
+// AcceptProposedCommand validates a model-proposed command and splits it into a
 // plain argv, or returns ok=false to reject it: it rejects anything over the
 // length bound, anything carrying a shell metacharacter (so the command can be
 // run WITHOUT a shell), and any command whose program is a shell no-op or a
 // read-only inspection command. Runnability is verified separately by Probe on
 // the returned argv.
-func acceptProposedCommand(cmd string) ([]string, bool) {
+func AcceptProposedCommand(cmd string) ([]string, bool) {
 	if len(cmd) > maxProposedCommandLen || strings.ContainsAny(cmd, proposedForbidden) {
 		return nil, false
 	}

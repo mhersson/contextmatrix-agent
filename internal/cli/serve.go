@@ -30,6 +30,7 @@ import (
 	"github.com/mhersson/contextmatrix-agent/internal/executor"
 	"github.com/mhersson/contextmatrix-agent/internal/filelog"
 	"github.com/mhersson/contextmatrix-agent/internal/metrics"
+	"github.com/mhersson/contextmatrix-agent/internal/runinput"
 	"github.com/mhersson/contextmatrix-agent/internal/secrets"
 	"github.com/mhersson/contextmatrix-agent/internal/webhook"
 	"github.com/mhersson/contextmatrix-backendkit/llmproxy"
@@ -132,6 +133,10 @@ func runServe(ctx context.Context, configPath string) error {
 	// Per-card container-output logs, always on; cfg.LogDir is never empty.
 	files := filelog.New(cfg.LogDir, logger)
 
+	// Run-kind inputs are not secrets: they live on disk under the log dir,
+	// never in the secrets dir.
+	inputs := runinput.New(filepath.Join(cfg.LogDir, ".run-inputs"), logger)
+
 	stopLogPruner := startLogPruner(files, time.Duration(cfg.LogRetentionDays)*24*time.Hour, 24*time.Hour, logger)
 	defer stopLogPruner()
 
@@ -146,9 +151,11 @@ func runServe(ctx context.Context, configPath string) error {
 	cbClient := callback.New(cfg.ContextMatrixURL, cfg.APIKey, logger).WithMetrics(mx)
 
 	bridge := logbridge.NewBridge(logbridge.BridgeConfig{
-		Hub:                  hub,
-		Redactor:             nil, // set dynamically via RedactorRegistry below
-		OnAwaiting:           func(k logbridge.Key, v bool) { tracker.SetAwaiting(k.Project, k.CardID, v) },
+		Hub:      hub,
+		Redactor: nil, // set dynamically via RedactorRegistry below
+		OnAwaiting: func(k logbridge.Key, v bool) {
+			tracker.SetAwaiting(executor.RunKey{Project: k.Project, CardID: k.CardID}, v)
+		},
 		SurfaceAwaitingHuman: true,
 		MapExtra:             agentMapExtra,
 	})
@@ -173,11 +180,11 @@ func runServe(ctx context.Context, configPath string) error {
 		ContainerTimeout: cfg.ContainerTimeout,
 		IdleTimeout:      cfg.IdleOutputTimeout,
 		PollInterval:     cfg.IdleWatchdogInterval,
-		OnStart: func(project, cardID, containerID, correlationID string) {
-			files.Begin(project, cardID, containerID, correlationID)
+		OnStart: func(k executor.RunKey, containerID, correlationID string) {
+			files.Begin(k.Project, k.Name(), containerID, correlationID)
 		},
 		OnLog:   containerLogSink(bridge, files, registry, outcomes),
-		OnExit:  onContainerExit(cbClient, reports, outcomes, credentials, proxy, files, registry, bridge, logger),
+		OnExit:  onContainerExit(cbClient, reports, outcomes, credentials, inputs, proxy, files, registry, bridge, logger),
 		Logger:  logger,
 		Metrics: mx,
 	})
@@ -192,6 +199,10 @@ func runServe(ctx context.Context, configPath string) error {
 	// runs, so any run dir on disk is stale secret material from a previous one.
 	if err := credentials.CleanupOrphans(); err != nil {
 		logger.Warn("per-run secrets cleanup failed", "error", err)
+	}
+
+	if err := inputs.CleanupOrphans(); err != nil {
+		logger.Warn("run input cleanup failed", "error", err)
 	}
 
 	var draining atomic.Bool
@@ -213,6 +224,8 @@ func runServe(ctx context.Context, configPath string) error {
 		Credentials:      credentials,
 		SessionSecrets:   registry,
 		LLMProxy:         proxy,
+		RunInputs:        inputs,
+		Sections:         files,
 		Images:           exec,
 		ImageListFilters: cfg.ImageListFilters,
 		Build:            buildinfo.Info(),
@@ -374,13 +387,18 @@ type workerDrain struct {
 	sweepTimeout time.Duration
 }
 
-// endSessions sends end_session to each run and returns the runs to wait on:
+// endSessions sends end_session to each card run (a run kind has no session,
+// so it goes straight to the sweep) and returns the runs to wait on:
 // those it reached, and those that exited since the snapshot, whose exit
 // callback may not have claimed their report yet.
 func (d workerDrain) endSessions(runs []*executor.Run) []*executor.Run {
 	ended := make([]*executor.Run, 0, len(runs))
 
 	for _, run := range runs {
+		if run.Kind != "" {
+			continue
+		}
+
 		if err := d.sessions.EndSession(run.Project, run.CardID); err != nil {
 			if !errors.Is(err, executor.ErrNotFound) {
 				d.logger.Warn("could not end session on shutdown; the run will be killed",
@@ -420,7 +438,7 @@ func (d workerDrain) parking(run *executor.Run) bool {
 // tracked compares by identity so a successor run under the same key is not
 // mistaken for the one shutdown asked to park.
 func (d workerDrain) tracked(run *executor.Run) bool {
-	current, ok := d.tracker.Get(run.Project, run.CardID)
+	current, ok := d.tracker.Get(run.Key())
 
 	return ok && current == run
 }
@@ -454,12 +472,12 @@ func (d workerDrain) sweep(live []*executor.Run) {
 // waits for its report to land instead.
 func (d workerDrain) settle(ctx context.Context, run *executor.Run) {
 	if d.tracked(run) {
-		d.logger.Info("killing container on shutdown", "project", run.Project, "card_id", run.CardID)
+		d.logger.Info("killing container on shutdown", "project", run.Project, "card_id", run.CardID, "kind", run.Kind)
 
-		if err := d.exec.Kill(ctx, run.Project, run.CardID); err != nil &&
+		if err := d.exec.Kill(ctx, run.Key()); err != nil &&
 			!errors.Is(err, executor.ErrNotFound) {
 			d.logger.Warn("failed to kill container on shutdown",
-				"project", run.Project, "card_id", run.CardID, "error", err)
+				"project", run.Project, "card_id", run.CardID, "kind", run.Kind, "error", err)
 		}
 	}
 
@@ -469,6 +487,7 @@ func (d workerDrain) settle(ctx context.Context, run *executor.Run) {
 		err := d.reporter.ReportStatus(ctx, protocol.StatusCallbackPayload{
 			CardID:       run.CardID,
 			Project:      run.Project,
+			Kind:         run.Kind,
 			WorkerStatus: "failed",
 			Message:      "service shutting down",
 			RunID:        run.CorrelationID,
@@ -476,7 +495,7 @@ func (d workerDrain) settle(ctx context.Context, run *executor.Run) {
 		})
 		if err != nil {
 			d.logger.Warn("failed to report shutdown status",
-				"project", run.Project, "card_id", run.CardID, "error", err)
+				"project", run.Project, "card_id", run.CardID, "kind", run.Kind, "error", err)
 		}
 	})
 	if owned {
@@ -615,20 +634,25 @@ func onDisplaceHook(proxy tokenRevoker) func(project, cardID, correlationID stri
 // raw line for both the stdout and stderr arms, so a CM-provisioned secret
 // never reaches disk in plaintext even in JSON fields the SSE bridge's
 // per-field redaction does not inspect. Outcome lines are recorded from stdout
-// only, masked: a container's stderr cannot name its run's cause.
+// only, masked: a container's stderr cannot name its run's cause. A run kind's
+// output stays off the live stream, which is keyed by card and would mix it
+// into the card run's.
 func containerLogSink(
 	bridge *logbridge.Bridge,
 	files *filelog.Logger,
 	registry *logbridge.RedactorRegistry,
 	outcomes *runOutcomes,
-) func(project, cardID, correlationID string, line []byte, stderr bool) {
-	return func(project, cardID, correlationID string, line []byte, stderr bool) {
+) func(k executor.RunKey, correlationID string, line []byte, stderr bool) {
+	return func(k executor.RunKey, correlationID string, line []byte, stderr bool) {
 		// Bridge to the live /logs SSE stream first so the interactive
 		// stream is never gated on the durable-log disk write. BridgeLine
 		// does not mutate line and Write copies it, so the order is safe.
-		bridge.BridgeLine(logbridge.Key{Project: project, CardID: cardID}, line, stderr)
+		if k.Kind == "" {
+			bridge.BridgeLine(logbridge.Key{Project: k.Project, CardID: k.CardID}, line, stderr)
+		}
+
 		masked := []byte(registry.RedactLine(string(line)))
-		files.Write(project, cardID, correlationID, masked, stderr)
+		files.Write(k.Project, k.Name(), correlationID, masked, stderr)
 
 		if !stderr {
 			outcomes.record(correlationID, masked)
@@ -638,27 +662,35 @@ func containerLogSink(
 
 // onContainerExit builds the executor OnExit hook. Order matters: the run_end
 // event goes out before files.End (End closes the writer), and End, Teardown,
-// the proxy-token Revoke and RemoveSessionKey all run before the status
-// callback that lets CM admit a re-trigger. Every cleanup is keyed by this
-// run's correlation id, so a stale exit racing a re-trigger inside the
-// pump-drain window touches only its own run. The callback is skipped when the
-// shutdown sweep has already reported the run.
+// a run kind's input dir removal, the proxy-token Revoke and RemoveSessionKey
+// all run before the status callback that lets CM admit a re-trigger. Every
+// cleanup is keyed by this run's correlation id, so a stale exit racing a
+// re-trigger inside the pump-drain window touches only its own run. The
+// callback is skipped when the shutdown sweep has already reported the run.
 func onContainerExit(
 	reporter webhook.StatusReporter,
 	reports *exitReports,
 	outcomes *runOutcomes,
 	credentials *secrets.RunCredentials,
+	inputs *runinput.Store,
 	proxy tokenRevoker,
 	files *filelog.Logger,
 	registry *logbridge.RedactorRegistry,
 	bridge *logbridge.Bridge,
 	logger *slog.Logger,
-) func(project, cardID string, exitCode int64, cause executor.ExitCause, ordinal int, correlationID string) {
-	return func(project, cardID string, exitCode int64, cause executor.ExitCause, ordinal int, correlationID string) {
-		emitRunEnd(bridge, files, project, cardID, correlationID, exitCode, cause, ordinal, logger)
+) func(k executor.RunKey, exitCode int64, cause executor.ExitCause, ordinal int, correlationID string) {
+	return func(k executor.RunKey, exitCode int64, cause executor.ExitCause, ordinal int, correlationID string) {
+		project, cardID := k.Project, k.CardID
 
-		files.End(project, cardID, correlationID, exitCode, string(cause))
-		credentials.Teardown(project, cardID, correlationID)
+		emitRunEnd(bridge, files, k, correlationID, exitCode, cause, ordinal, logger)
+
+		files.End(project, k.Name(), correlationID, exitCode, string(cause))
+		credentials.Teardown(project, k.Name(), correlationID)
+
+		if k.Kind != "" {
+			inputs.Remove(correlationID)
+		}
+
 		proxy.Revoke(correlationID)
 
 		// Remove the session secrets after credential teardown but before
@@ -666,7 +698,7 @@ func onContainerExit(
 		registry.RemoveSessionKey(webhook.SessionID(project, cardID, correlationID))
 
 		// Taken on every exit, including one whose report the sweep owns.
-		payload := exitPayload(project, cardID, correlationID, exitCode, cause,
+		payload := exitPayload(k, correlationID, exitCode, cause,
 			outcomes.take(correlationID), reports.shuttingDown())
 
 		reports.report(correlationID, func() {
@@ -675,7 +707,7 @@ func onContainerExit(
 
 			if err := reporter.ReportStatus(ctx, payload); err != nil {
 				logger.Error("report exit status callback failed",
-					"project", project, "card_id", cardID, "status", payload.WorkerStatus, "error", err)
+					"project", project, "card_id", cardID, "kind", k.Kind, "status", payload.WorkerStatus, "error", err)
 			}
 		})
 	}
@@ -696,7 +728,8 @@ const runEndKind = "run_end"
 func emitRunEnd(
 	bridge *logbridge.Bridge,
 	files *filelog.Logger,
-	project, cardID, correlationID string,
+	k executor.RunKey,
+	correlationID string,
 	exitCode int64,
 	cause executor.ExitCause,
 	ordinal int,
@@ -705,15 +738,19 @@ func emitRunEnd(
 	line, err := json.Marshal(runEndEvent(exitCode, cause, ordinal))
 	if err != nil {
 		logger.Warn("could not build the run_end event",
-			"project", project, "card_id", cardID, "error", err)
+			"project", k.Project, "card_id", k.CardID, "kind", k.Kind, "error", err)
 
 		return
 	}
 
 	// Same order as the output tee: the live stream is never gated on a disk
-	// write, BridgeLine does not mutate line and Write copies it.
-	bridge.BridgeLine(logbridge.Key{Project: project, CardID: cardID}, line, false)
-	files.Write(project, cardID, correlationID, line, false)
+	// write, BridgeLine does not mutate line and Write copies it. A run kind's
+	// end stays off the live stream, as its output does.
+	if k.Kind == "" {
+		bridge.BridgeLine(logbridge.Key{Project: k.Project, CardID: k.CardID}, line, false)
+	}
+
+	files.Write(k.Project, k.Name(), correlationID, line, false)
 }
 
 // runEndEvent builds the terminal line in the envelope the worker's own events

@@ -1,9 +1,9 @@
 // Package filelog writes raw worker-container output to one append file per
-// card on the agent host. It is the durable counterpart to the ephemeral /logs
-// SSE stream: a faithful, human-readable capture of everything a container
-// printed (stdout JSONL transcript + stderr slog), as `docker logs -f` would
-// show it. Logging failures are warned and swallowed so a run never fails
-// because its log could not be written.
+// card, and one per run kind of the card, on the agent host. It is the durable
+// counterpart to the ephemeral /logs SSE stream: a faithful, human-readable
+// capture of everything a container printed (stdout JSONL transcript + stderr
+// slog), as `docker logs -f` would show it. Logging failures are warned and
+// swallowed so a run never fails because its log could not be written.
 package filelog
 
 import (
@@ -32,7 +32,8 @@ const runHeaderPrefix = "==== run started "
 // timeout or a wait failure.
 const causeSuperseded = "superseded"
 
-// Logger writes per-card container output to <dir>/<project>/<cardID>.log.
+// Logger writes per-run container output to <dir>/<project>/<name>.log, where
+// the name is a card ID or a card ID plus run kind.
 // A nil *Logger, or one built with an empty dir, disables every operation.
 // Open writers are keyed by (project, cardID, correlationID), so two runs of
 // one card - a re-trigger racing the previous run's drain - append to the
