@@ -63,16 +63,7 @@ forward_to: IDs, among the sibling inputs, that the same fix suits without
 loosening any of their criteria. Leave it empty when none do.
 
 findings: the friction the run shows, each of one kind:
-- guidance: lines for the project's AGENTS.md or CLAUDE.md.
-- code: friction in the project's code, as a card: a title and a body.
-- card_advice: advice on writing cards like this one.
-- project_verify: a proposal for the project's verify setting, for admins.
-- hard_card: a note that this card is hard.
-- ecosystem: a bug in ContextMatrix or the agent, or its generic prompts, as
-  an issue: a title and a body. Documented, intentional behaviour of the agent
-  or ContextMatrix is not a bug.
-Evidence summarises what in the run shows the friction and names no card IDs.
-
+%s
 When you are done, call report_investigation once. It ends the run.
 `
 
@@ -85,7 +76,7 @@ func investigatePrompt(grounding, workspace, inputs, runLog string, in protocol.
 			"The card has no subtasks among the inputs: leave retire_subtasks empty."),
 		inputsLine(filepath.Join(inputs, "siblings"), len(in.Siblings), "the not-yet-started cards of the same playbook run",
 			"There are no sibling cards: leave forward_to empty."),
-		runLog, stopLine(in.StopCause), verifyLine(in.Verify))
+		runLog, stopLine(in.StopCause), verifyLine(in.Verify), findingKindsText)
 }
 
 func branchLine(branch string) string {
