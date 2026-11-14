@@ -209,9 +209,7 @@ func TestGuidancePROpensAFreshPR(t *testing.T) {
 	assert.Equal(t, tgit(t, bareDir(repo), "rev-parse", "main"), tgit(t, bareDir(repo), "rev-parse", tip+"^"))
 	assert.Equal(t, "AGENTS.md", tgit(t, bareDir(repo), "diff-tree", "--no-commit-id", "--name-only", "-r", tip))
 
-	want, err := withGuidance("# Repo\n", "alpha", testSection)
-	require.NoError(t, err)
-	assert.Equal(t, strings.TrimSpace(want), fileAt(t, repo, tip, "AGENTS.md"))
+	assert.Equal(t, "# Repo\n\n"+testSection, fileAt(t, repo, tip, "AGENTS.md"))
 
 	require.Len(t, f.created, 1)
 	assert.Equal(t, prCall{title: "Guidance", body: "Body", base: "main", head: testBranch}, f.created[0])
@@ -255,9 +253,8 @@ func TestGuidancePRRevisesItsOwnPR(t *testing.T) {
 	assert.Equal(t, []prCall{{url: testPRURL, title: "Guidance 2", body: "Body 2"}}, f.edited)
 	assert.Empty(t, f.created)
 
-	text := fileAt(t, repo, tip, "AGENTS.md")
-	assert.Contains(t, text, "Prefer small commits.")
-	assert.NotContains(t, text, testSection, "a revision carries the new section, not the old one on top")
+	assert.Equal(t, "# Repo\n\nPrefer small commits.", fileAt(t, repo, tip, "AGENTS.md"),
+		"a revision is the base file plus the new section, nothing of the old one")
 }
 
 func TestGuidancePRUnchanged(t *testing.T) {
@@ -528,15 +525,6 @@ func TestGuidancePRRevisionRefusesALinkTheBaseNoLongerHas(t *testing.T) {
 	assert.Equal(t, first.HeadSHA, remoteTip(t, repo))
 	assert.Empty(t, f.created)
 	assert.Empty(t, f.edited)
-}
-
-func TestGuidancePRMalformedBlockFails(t *testing.T) {
-	start, _ := blockMarkers("alpha")
-	repo := guidanceRepo(t, map[string]string{"AGENTS.md": start + "\n" + start + "\n"}, nil)
-
-	_, err := runGuidance(t, guidanceSpec(t, repo), guidanceIn(""), &fakePRs{})
-	require.ErrorIs(t, err, errMalformedBlock)
-	assert.False(t, remoteHasBranch(t, repo))
 }
 
 func TestRunGuidancePREndToEnd(t *testing.T) {

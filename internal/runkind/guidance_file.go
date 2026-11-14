@@ -8,6 +8,15 @@ import (
 	"strings"
 )
 
+// guidanceFile picks the root instruction file in grounding's order.
+func guidanceFile(hasAgents, hasClaude bool) string {
+	if !hasAgents && hasClaude {
+		return "CLAUDE.md"
+	}
+
+	return "AGENTS.md"
+}
+
 // instructionFile returns the repo-relative path of the file grounding reads:
 // root AGENTS.md, else root CLAUDE.md, else a new AGENTS.md. A symlink there is
 // followed to its target.

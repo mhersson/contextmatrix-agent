@@ -4,7 +4,6 @@ import (
 	"strings"
 
 	"github.com/mhersson/contextmatrix-agent/internal/cardid"
-	"github.com/mhersson/contextmatrix-agent/internal/runkind"
 	protocol "github.com/mhersson/contextmatrix-protocol"
 )
 
@@ -66,7 +65,7 @@ func runKindInvalidField(p protocol.RunKindPayload) string {
 // prefixed with its object, or "".
 func guidancePRInvalidField(in *protocol.GuidancePRInput) string {
 	switch {
-	case in.Section == "", len(in.Section) > maxGuidanceSection, strings.Contains(in.Section, runkind.GuidanceMarkerPrefix):
+	case in.Section == "", len(in.Section) > maxGuidanceSection:
 		return "guidance_pr.section"
 	case in.Title == "", len(in.Title) > maxGuidanceTitle, strings.ContainsAny(in.Title, "\r\n"):
 		return "guidance_pr.title"

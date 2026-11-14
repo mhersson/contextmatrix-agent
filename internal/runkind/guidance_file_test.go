@@ -9,6 +9,24 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestGuidanceFile(t *testing.T) {
+	tests := []struct {
+		name                 string
+		hasAgents, hasClaude bool
+		want                 string
+	}{
+		{"both", true, true, "AGENTS.md"},
+		{"agents only", true, false, "AGENTS.md"},
+		{"claude only", false, true, "CLAUDE.md"},
+		{"neither", false, false, "AGENTS.md"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, guidanceFile(tt.hasAgents, tt.hasClaude))
+		})
+	}
+}
+
 func TestInstructionFileTarget(t *testing.T) {
 	tests := []struct {
 		name  string
