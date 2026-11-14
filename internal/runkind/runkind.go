@@ -1,6 +1,7 @@
-// Package runkind runs the sandboxed run kinds ContextMatrix dispatches for one
-// card: one file per kind, no MCP. Each run clones the base branch, runs its
-// kind and ends with one run_outcome line carrying the masked, bounded result.
+// Package runkind runs the sandboxed run kinds ContextMatrix dispatches, for a
+// card or for a project: one file per kind, no MCP. Each run clones the base
+// branch, runs its kind and ends with one run_outcome line carrying the masked,
+// bounded result.
 package runkind
 
 import (

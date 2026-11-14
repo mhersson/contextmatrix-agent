@@ -42,7 +42,8 @@ The answers are:
 | 202    | -               | accepted; the launch runs asynchronously       |
 
 `handleRunKind` (`internal/webhook/runkind.go`) mints the run id from the card
-ID and the kind plus a random suffix, then the `X-Correlation-ID` header, as
+ID (the project for `guidance_pr`, which has no card) and the kind plus a random
+suffix, then the `X-Correlation-ID` header, as
 `/trigger` does, and launches through the card runs' admission path
 (`admitAndLaunch`, `internal/webhook/launch.go`). A run kind sends no `running`
 status. A launch that fails sends one `failed` status with `kind`, `run_id` and
@@ -106,8 +107,9 @@ status is `failed` with its kind and stop cause `shutdown`
 ## Credentials
 
 The agent stages the payload's git token into the run's own credentials dir
-once, for the clone at start, and never refreshes it: the payload carries no
-expiry. The agent cannot narrow the token, so on a personal access token
+once and never refreshes it: the payload carries no
+expiry. A run uses it for the clone; `guidance_pr` also uses it for its remote
+lookups, fetch, push and `gh` calls. The agent cannot narrow the token, so on a personal access token
 installation the run may carry the PAT's full scope. The run kinds give the
 model no tool that writes to git.
 
@@ -144,8 +146,8 @@ end of the file. A 256 MiB safety cap keeps the first 32 MiB and the last 224
 MiB, with a `==== <n> bytes cut ====` line between them. A missing section fails
 the run as `run log not found` with stop cause `error`; any other
 staging error fails it with stop cause `infrastructure`. Nothing launches in
-either case. A run kind writes its own `<card>-<kind>` log, never into the
-card's file.
+either case. A run kind writes its own `<card>-<kind>` log (`guidance_pr`:
+`<project>/<kind>.log`), never into the card's file.
 
 ## In the worker
 
@@ -156,7 +158,7 @@ does, and reads its input from `/run/cm-input/input.json`. When the secrets
 file carries LLM access, which serve stages only for a kind that needs a model,
 it builds the LLM client as a card run does; a `check` gets none. `runkind.Run`
 (`internal/runkind/runkind.go`) clones the base branch, or the remote default
-when none is set, into `/home/user/workspace/<card id in lower case>`, decodes
+when none is set, into `/home/user/workspace/<card id in lower case>` (`/home/user/workspace/<kind>` for `guidance_pr`), decodes
 the input and runs the kind. Its stdout ends with one `run_outcome` line: the
 cause, a model kind's usage rows, and on `done` the result. Before it is
 written, the result is masked with the secrets the worker holds (the git token,

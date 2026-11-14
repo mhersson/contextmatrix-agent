@@ -30,7 +30,7 @@ type SectionSource interface {
 	CopySection(project, cardID, runID string, w io.Writer) error
 }
 
-// handleRunKind admits a sandboxed run kind for one card: validate, refuse at
+// handleRunKind admits a sandboxed run kind, for a card or a project: validate, refuse at
 // capacity, then 202 and an asynchronous launch, as /trigger does.
 func (s *Server) handleRunKind(w http.ResponseWriter, r *http.Request) {
 	var p protocol.RunKindPayload

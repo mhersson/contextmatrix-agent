@@ -172,11 +172,12 @@ and with the worker's run redactor. Mechanics in the `serve.go` and `admitAndLau
 A [run kind](run-kinds.md) gets no MCP key or URL: its payload has no key
 field, `serve` sets neither `CM_MCP_URL` nor `CM_MCP_API_KEY`, and it never
 falls back to the configured `mcp_api_key` as a card run does. Its git token is
-staged into its own per-run dir, `<secrets_dir>/runs/<project>/<card>-<kind>/`,
-once: the payload carries no expiry, so no refresh loop runs. An `investigate`
-run gets the [LLM proxy](#llm-proxy)'s stand-in token, or the
+staged into its own per-run dir, `<secrets_dir>/runs/<project>/<card>-<kind>/`
+(`<project>/<kind>/` for `guidance_pr`, which has no card), once: the payload
+carries no expiry, so no refresh loop runs. An `investigate`
+or `analyse` run gets the [LLM proxy](#llm-proxy)'s stand-in token, or the
 [Claude Code token](#claude-code-token), exactly as a card run does; a `check`
-registers nothing with the proxy and stages no LLM values.
+or `guidance_pr` registers nothing with the proxy and stages no LLM values.
 
 Its inputs are not secrets. They live in their own dir on disk,
 `<log_dir>/.run-inputs/<run id>/`, mounted read-only at `/run/cm-input`, never
