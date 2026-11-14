@@ -391,11 +391,12 @@ The run goes in this order, and stops at the first step that ends it:
    to a directory, or a root name that is a directory, ends the run with cause
    `error`.
 6. The new text is the base branch's file with `section`'s lines appended
-   after one blank line; the file's other text stays as it is. Grounding
-   injects only the first 64 KiB of the file, so lines that would end past that
-   go right after the file's first `# ` line (or at the top). A revision of an
-   open PR rebuilds the file the same way, as the base branch's file plus the
-   section, which carries all of the PR's lines.
+   after one blank line, which replaces the file's trailing newlines; the rest
+   of the file stays as it is. Grounding injects only the first 64 KiB of the
+   file, so lines that would end past that go right after the file's first `# `
+   line (or at the top), with the rest of the file byte for byte. A revision of
+   an open PR rebuilds the file the same way, as the base branch's file plus
+   the section, which carries all of the PR's lines.
 7. With `expect_head` the branch is cut from that commit, fetched from the
    remote; the instruction file must resolve to the same path there as on the
    base, else the run ends with cause `error` before writing. Without it, the
