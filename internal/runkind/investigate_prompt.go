@@ -38,10 +38,13 @@ one cause:
 - environment: outside the card and the agent: credentials, network, the
   worker image.
 - ecosystem: a bug in ContextMatrix or the agent, or its generic prompts.
+  Documented, intentional behaviour of the agent or ContextMatrix is not a bug.
 
 Only with cause card, propose a fix. It can hold only these fields:
 - section: the content of a "## Sentinel" body section, without its heading
-  and with no H2 line: guidance the next run needs.
+  and with no H2 line: guidance the next run needs. Use code spans or fenced
+  blocks in it only for a command the repository declares, and describe
+  everything else in prose: other code text makes the fix fail the text check.
 - verify: the card's verify fields, replaced whole.
   - The command must be the one in force, or one the repository itself
     declares, as plain argv with no shell operators.
@@ -66,7 +69,8 @@ findings: the friction the run shows, each of one kind:
 - project_verify: a proposal for the project's verify setting, for admins.
 - hard_card: a note that this card is hard.
 - ecosystem: a bug in ContextMatrix or the agent, or its generic prompts, as
-  an issue: a title and a body.
+  an issue: a title and a body. Documented, intentional behaviour of the agent
+  or ContextMatrix is not a bug.
 Evidence summarises what in the run shows the friction and names no card IDs.
 
 When you are done, call report_investigation once. It ends the run.
