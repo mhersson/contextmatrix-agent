@@ -120,6 +120,19 @@ be absent from the repo (check the quoted path or artifact); a claimed
 out-of-repo write target must genuinely point outside the repo. Report each
 claim in your findings as VERIFIED or REFUTED with one line of evidence.`
 
+// designChoiceReviewRule and designChoiceVerdictRule leave the choice of
+// option to the human PR reviewer. The first is shared by specialistPrompt and
+// reviewBriefing; the second is a verdictDecisionRule bullet.
+const designChoiceReviewRule = `The change may build one option of a design choice the card left open. Which
+option to build is the human PR reviewer's decision: judge whether the chosen
+option is built well and meets the card, and never raise that a design choice
+was made without a maintainer, even when a project instruction reserves such
+choices for one.`
+
+const designChoiceVerdictRule = `- Design choices: which option of a choice the card left open the change
+  builds is the human PR reviewer's decision. Judge whether it is built well;
+  drop any finding that a design choice was made without a maintainer.`
+
 // unreachableVerdictRule is the decision-rule bullet that exempts an
 // unreachable acceptance criterion the reviewers VERIFIED from blocking the
 // verdict, while a REFUTED one stays an ordinary unmet criterion, and notes
@@ -582,6 +595,8 @@ verdict.
 
 ` + unreachableVerifyInstruction + `
 
+` + designChoiceReviewRule + `
+
 %s%s
 
 Review only the change set in the diff below. Read surrounding code for context
@@ -699,7 +714,8 @@ const verdictDecisionRule = `Decision rule:
 ` + basisVocabularyRule + `
 ` + fixScopedSeverityRule + `
 ` + convergenceRule + `
-` + unreachableVerdictRule
+` + unreachableVerdictRule + `
+` + designChoiceVerdictRule
 
 // synthesisRules is the solo synthesizer's decision rule and finding
 // discipline, shared by synthesisPrompt and genericSynthesisPrompt so the two
@@ -1395,6 +1411,8 @@ the critique round, contest findings you disagree with and explicitly
 withdraw your own findings that did not survive rebuttal.
 
 ` + unreachableVerifyInstruction + `
+
+` + designChoiceReviewRule + `
 
 %sPARENT CARD
 Title: %s

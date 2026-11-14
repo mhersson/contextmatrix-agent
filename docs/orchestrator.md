@@ -654,7 +654,10 @@ appends it to the PR body by code as `## Design choice`, so a resume keeps it.
 The planner never stops for a design choice: the PR review is the decision
 point. When every option breaks something the card or the project explicitly
 forbids, it plans the least-breaking one and names the conflict in
-`design_choice`.
+`design_choice`. Review holds to the same point: the specialists, the mob
+review seats and every synthesizer judge whether the chosen option is built
+well, and never treat a design choice made without a maintainer as a finding
+(`designChoiceReviewRule`, `designChoiceVerdictRule`).
 
 ### Follow-up creation
 
