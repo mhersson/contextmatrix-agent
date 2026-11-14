@@ -183,7 +183,6 @@ func (f *fakeOps) allArgsOf(op string) [][]any {
 	return out
 }
 
-// state returns the fake's current card state.
 // logMessages returns every AddLog message in order.
 func (f *fakeOps) logMessages() []string {
 	var out []string
@@ -194,6 +193,7 @@ func (f *fakeOps) logMessages() []string {
 	return out
 }
 
+// state returns the fake's current card state.
 func (f *fakeOps) state() string {
 	f.mu.Lock()
 	defer f.mu.Unlock()

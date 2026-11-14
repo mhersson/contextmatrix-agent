@@ -814,15 +814,16 @@ type parkOutcome struct {
 }
 
 // parkLine is the card line that says where the park left the card, so a
-// board without a way into blocked never reads as a blocked park.
+// failed move never reads as a blocked park. It names no cause: a board
+// without a way into blocked and a transient error look the same here.
 func parkLine(o parkOutcome) string {
 	switch {
 	case o.blocked:
 		return "parked the card as blocked"
 	case o.state == "":
-		return "the board does not allow a move to blocked, so the card stays where it was"
+		return "could not move the card to blocked (the board may have no way into it), so it stays where it was"
 	default:
-		return fmt.Sprintf("the board does not allow a move to blocked, so the card stays in %s", o.state)
+		return fmt.Sprintf("could not move the card to blocked (the board may have no way into it), so it stays in %s", o.state)
 	}
 }
 
