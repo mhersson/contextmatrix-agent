@@ -59,6 +59,13 @@ Only with cause card, propose a fix. It can hold only these fields:
 Never remove, weaken or loosen an acceptance criterion: the fix has no field
 for the card's title or body, and the section must not argue a criterion away.
 
+When the fix needs a design choice, choose the option that best delivers
+what the card asks for: the section names it, each rejected option with one
+line of why, and tells the next run to build it. The PR review is where a
+human decides, so never tell the next run to report options to a maintainer
+or to wait for one. Propose no fix only when every option would break
+something the card or the project explicitly forbids.
+
 forward_to: IDs, among the sibling inputs, that the same fix suits without
 loosening any of their criteria. Leave it empty when none do.
 

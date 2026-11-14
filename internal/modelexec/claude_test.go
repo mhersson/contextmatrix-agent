@@ -363,9 +363,8 @@ func TestClaudeSpawnSubagentsRunsOneRunPerSpec(t *testing.T) {
 			{Role: "b", Prompt: "prompt-b", Model: "anthropic/claude-opus-5.5"},
 			{Role: "c", Prompt: "prompt-c"},
 		},
-		Opts:      harness.SubagentOpts{DefaultModel: "anthropic/claude-sonnet-5.5", ExtraReadOnlyTools: []tools.Tool{extra}},
-		OnDelta:   func(llm.Delta) {},
-		BudgetUSD: 0.7,
+		Opts:    harness.SubagentOpts{DefaultModel: "anthropic/claude-sonnet-5.5", ExtraReadOnlyTools: []tools.Tool{extra}},
+		OnDelta: func(llm.Delta) {},
 	}
 
 	results, err := c.SpawnSubagents(t.Context(), req)
@@ -391,7 +390,6 @@ func TestClaudeSpawnSubagentsRunsOneRunPerSpec(t *testing.T) {
 			assert.True(t, ok, n)
 		}
 
-		assert.InDelta(t, 0.7, s.MaxBudgetUSD, 1e-9)
 		assert.NotNil(t, s.OnDelta)
 	}
 }
@@ -688,4 +686,17 @@ func TestClaudeSpawnSubagentsCapsBridgedOutput(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotContains(t, res.Text, bridgeSecret)
 	assert.Equal(t, tools.HeadTail(redactSecret(body), limit), res.Text)
+}
+
+func TestClaudeRunReturnsATurnCappedRunWithItsMessages(t *testing.T) {
+	msgs := []llm.Message{{Role: "user", Content: "q"}, {Role: "assistant", Content: "found it"}}
+	f := &fakeRunner{script: func(claudecode.Spec) (harness.Result, error) {
+		return harness.Result{Reason: "max_turns", Turns: 40, Messages: msgs}, nil
+	}}
+	c := newTestClaude(t, ClaudeConfig{}, f)
+
+	res, err := c.Run(t.Context(), baseReq())
+	require.NoError(t, err)
+	assert.Equal(t, "max_turns", res.Reason)
+	assert.Equal(t, msgs, res.Messages)
 }

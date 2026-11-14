@@ -139,7 +139,7 @@ func (o *run) runModelCfg(ctx context.Context, scope runScope, reg *tools.Regist
 	client := &lastReplyClient{LLM: o.d.Client}
 
 	start := time.Now()
-	res, err := o.execRun(ctx, scope.ledger, RunRequest{
+	res, err := o.execRun(ctx, RunRequest{
 		Client:   client,
 		Registry: reg,
 		Emit:     o.d.Emit,
@@ -170,10 +170,13 @@ func (o *run) runModelCfg(ctx context.Context, scope runScope, reg *tools.Regist
 		return res, dur, &MaxTurnsError{Model: model, Turns: res.Turns}
 	}
 
-	// No caller sets a cost cap, so this is execRun's ledger cap: the run's work
-	// is truncated and must park, never be acted on as finished.
+	// A cost-capped run's work is truncated: it must park, never be acted on as
+	// finished. The error names scope.ledger, or the run ledger when nil.
 	if err == nil && res.Reason == "max_cost" {
-		l := o.bindingLedger(scope.ledger)
+		l := scope.ledger
+		if l == nil {
+			l = o.ledger
+		}
 
 		return res, dur, &BudgetExceededError{Spent: l.Spent() + res.TotalCostUSD, Max: l.max}
 	}
@@ -306,13 +309,11 @@ const wrapUpTurns = 5
 // wrapUpTurns so the wrap-up nudge still lands.
 const planRepairMaxTurns = 12
 
-// planMaxTurns caps the planner's first attempt. The plan phase is the one
-// model run with no terminal tool and no tier scaling, so without a cap of its
-// own it inherits the flat configured budget and the wrap-up nudge can sit
-// beyond any turn the planner actually reaches - leaving the phase unguarded.
-// Chosen to sit well above where a planner has converged in practice, so the
-// cap is a backstop rather than the primary control.
-const planMaxTurns = 25
+// planMaxTurns caps the planner's first attempt: it has no terminal tool, and
+// in Claude Code mode no wrap-up nudge, so the cap is its only stop. A planner
+// on a mid-size repository stopped at 25 before emitting a plan; 40 leaves
+// room for that exploration and stays a backstop.
+const planMaxTurns = 40
 
 // planTurnCap is the plan run's turn budget. Both cases are min'd with base so
 // a smaller configured cap is never raised.
@@ -324,14 +325,11 @@ func planTurnCap(base int, repair bool) int {
 	return min(base, planMaxTurns)
 }
 
-// diagnoseMaxTurns caps the diagnosis phase. Like the planner it is a
-// read-only investigation with no terminal tool and no tier scaling, so
-// without a cap of its own it inherits the flat configured budget and the
-// wrap-up nudge can sit beyond any turn it actually reaches. Set to the
-// planner's value: the two phases explore comparable breadth, and the
-// guarded planner never reached 25 across a recorded batch of 16 runs while
-// an unguarded diagnosis run reached 28.
-const diagnoseMaxTurns = 25
+// diagnoseMaxTurns caps the diagnosis pass, read-only with no terminal tool
+// like the planner. On one mid-size repository a diagnosis took 21 turns on
+// one run and stopped at 25 on another; 40 covers that spread. A capped
+// diagnosis still reaches the planner, marked incomplete.
+const diagnoseMaxTurns = 40
 
 // diagnoseTurnCap is the diagnosis run's turn budget, min'd with base so a
 // smaller configured cap is never raised - mirrors planTurnCap.

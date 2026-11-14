@@ -253,7 +253,7 @@ secrets_dir: /var/run/cm-agent/secrets
 # The orchestrator enforces this ceiling and aborts the card when exceeded.
 # 0 disables the ceiling. Note: koanf cannot distinguish an absent key from
 # an explicit 0 - if the key is absent the default (5.0) applies; an explicit
-# 0 in YAML or via env disables the ceiling.
+# 0 in YAML or via env disables the ceiling. claude_code runs do not enforce it.
 # Default: 5.0
 # CMX_MAX_CARD_COST
 max_card_cost: 5.0

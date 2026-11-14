@@ -43,6 +43,13 @@ empty repository the first subtask sets the project up far enough for the
 verify command to pass, and work the card wants "first" rides in that subtask
 rather than in one the verify command cannot pass.
 
+A bug-like card gets a read-only diagnosis pass before planning, capped at
+40 turns (`diagnoseMaxTurns`). The planner's first attempt is capped at 40
+(`planMaxTurns`) and its repair turn at 12. A diagnosis that stops at its
+cap hands the planner the text it wrote so far, marked incomplete, and
+records it as `## Diagnosis`, so planning builds on it rather than starting
+over.
+
 Documentation the card's acceptance criteria require (named files under
 `docs/`, a README, specific claims that must change) is planned as a
 deliverable in the plan phase - either alongside the code subtask that changes
@@ -412,15 +419,15 @@ per run as a `replay_excluded` state change naming the model and the reason.
 
 ## Per-card budget
 
-One cumulative USD ceiling (`CMX_MAX_CARD_COST`, default 5.0) spans the
-orchestrator and every subagent. A breach parks the card - WIP pushed, card
+On an endpoint, one cumulative USD ceiling (`CMX_MAX_CARD_COST`, default 5.0)
+spans the orchestrator and every subagent. A breach parks the card - WIP pushed, card
 released, failed callback - it does not kill mid-turn. The ledger's floor is
 CM's server-priced card totals, synced from every `report_usage` response -
 the ceiling holds even when the gateway reports no per-call cost. Subtask runs
 report against the subtask cards, and CM does not roll that spend into the
 parent's total, so a resumed run also floors the ledger on the parent's and
 every subtask's reported total, finished subtasks included, before the first
-phase runs.
+phase runs. Claude Code mode enforces no ceiling (see [Budget](#budget)).
 
 ## How a run ends
 
@@ -490,21 +497,12 @@ Lost in this mode:
 
 ### Budget
 
-Each Claude Code run is capped (`--max-budget-usd`) at what remains of the
-run's ceiling, on notional cost, unless its caller set a cap. That ceiling is
-`CMX_MAX_CARD_COST`, or (N+1) x `CMX_MAX_CARD_COST` for a Best-of-N card (N
-candidate allowances plus one for the shared phases), plus the mob discussion
-allowance when the card runs mob sessions. A Best-of-N candidate, which has its
-own ledger of one `CMX_MAX_CARD_COST`, is capped by the smaller of its own
-remainder and the run's; a mob seat keeps its per-turn cap, and the seat's
-final-answer backstop sets none, so it gets the remaining budget. The review
-specialists run concurrently, go out as one fan-out and split the run's
-remainder equally. A run never starts with either ledger exhausted. A phase
-run stopped at its cap is never treated as finished work: a subtask it was
-coding is not completed and parks on the budget with its tree pushed as WIP,
-and a Best-of-N candidate drops out of the judge pool. A run whose final answer
-crosses its cap still ends done with that answer, and the next run refuses on
-the exhausted ledger, as on the harness.
+Claude Code mode enforces no card budget, since the subscription is not billed
+per token. `CMX_MAX_CARD_COST` sets no ceiling: no run gets a
+`--max-budget-usd` cap, a Best-of-N card runs its configured N candidates, and
+mob discussions and the review specialists draw on no budget share. The usage
+limit (below), each phase's turn cap and the container timeout bound a run
+instead.
 
 ### Mob sessions
 
@@ -525,8 +523,8 @@ and the ladder decides.
 ### Usage reports
 
 Usage is reported with `cost_basis: subscription` and the last-seen limit
-windows (`subscription_usage`), never a billed cost. The card budget meters
-Claude Code's notional (list-price) cost.
+windows (`subscription_usage`), never a billed cost. The card total CM returns
+is notional (list-price) cost, and no ceiling applies to it.
 
 ### Usage limit
 
@@ -625,8 +623,9 @@ from `workflow-skills` and the MCP `get_skill` tool.
 ## Plan-time deliverable split and unreachable criteria
 
 The planner's JSON contract adds two optional arrays alongside `card_tier` and
-`subtasks`: `followup_cards` and `unreachable_criteria`. Both are omitted from
-the response when empty and validated in `parsePlan` (non-empty
+`subtasks`: `followup_cards` and `unreachable_criteria`, and an optional
+`design_choice` string. All three are omitted from the response when empty; the
+arrays are validated in `parsePlan` (non-empty
 title/description, `depends_on` referencing only earlier entries in their own
 array) without a size check - the cap is enforced where the plan is consumed,
 not there.
@@ -640,7 +639,25 @@ single deliverable stays one plan. When the trigger fires, the planner plans
 only the first deliverable as subtasks and emits each extra deliverable as a
 `followup_cards` entry: a title plus a SELF-CONTAINED description, since its
 future executor runs later in a fresh container holding only the repo, without
-this card or this plan.
+this card or this plan. A split never moves the outcome the card exists for
+into a follow-up card.
+
+### Design choice
+
+When the card offers alternatives or its fix needs a design choice the card
+does not settle, the planner picks one option and plans it. `design_choice` names
+the chosen option and each rejected one, each with one line of why. It is
+recorded as the opening `### Design choice` block of `## Plan` (also shown at
+the HITL plan gate). The integrate phase reads it back from the card body and
+appends it to the PR body by code as `## Design choice`, so a resume keeps it.
+
+The planner never stops for a design choice: the PR review is the decision
+point. When every option breaks something the card or the project explicitly
+forbids, it plans the least-breaking one and names the conflict in
+`design_choice`. Review holds to the same point: the specialists, the mob
+review seats and every synthesizer judge whether the chosen option is built
+well, and never treat a design choice made without a maintainer as a finding
+(`designChoiceReviewRule`, `designChoiceVerdictRule`).
 
 ### Follow-up creation
 

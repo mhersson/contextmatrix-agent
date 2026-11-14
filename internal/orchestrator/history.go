@@ -186,13 +186,57 @@ func sectionFrom(heading, content string) string {
 	return "## " + heading + "\n\n" + c
 }
 
+// designChoiceHeading opens the planner's design-choice block inside "## Plan".
+const designChoiceHeading = "### Design choice"
+
+// writeDesignChoice writes the design-choice block, or nothing when choice is
+// blank. Escaping keeps a "### " line in the text from ending the block early.
+func writeDesignChoice(b *strings.Builder, choice string) {
+	choice = strings.TrimSpace(choice)
+	if choice == "" {
+		return
+	}
+
+	b.WriteString(designChoiceHeading + "\n\n")
+	b.WriteString(escapeHeadingsAndFences(choice))
+	b.WriteString("\n\n")
+}
+
+// designChoiceFromBody returns the "### Design choice" block of the card
+// body's "## Plan" section, up to the next "### " line, trimmed; "" if absent.
+func designChoiceFromBody(body string) string {
+	lines := strings.Split(extractSection(body, "Plan"), "\n")
+
+	var out []string
+
+	in := false
+
+	for _, l := range lines {
+		switch {
+		case !in && strings.TrimSpace(l) == designChoiceHeading:
+			in = true
+		case !in && strings.HasPrefix(l, "### "):
+			// The block is the opening one; a subtask body is unescaped.
+			return ""
+		case in && strings.HasPrefix(l, "### "):
+			return strings.TrimSpace(strings.Join(out, "\n"))
+		case in:
+			out = append(out, l)
+		}
+	}
+
+	return strings.TrimSpace(strings.Join(out, "\n"))
+}
+
 // formatPlan renders the subtask decomposition as the "## Plan" body, so the
 // parent card shows the whole plan, not just scattered subtask cards. Each
 // subtask is a numbered heading plus an italic bar/turns/deps line and its own
 // body block, keeping multi-line bodies readable rather than crammed onto one
 // line.
-func formatPlan(subs []subtaskRef) string {
+func formatPlan(choice string, subs []subtaskRef) string {
 	var b strings.Builder
+
+	writeDesignChoice(&b, choice)
 
 	for i, s := range subs {
 		deps := "none"
@@ -227,6 +271,8 @@ func formatPlannedPlan(p plan) string {
 	var b strings.Builder
 
 	fmt.Fprintf(&b, "Overall bar: %s\n\n", p.CardTier)
+
+	writeDesignChoice(&b, p.DesignChoice)
 
 	for i, st := range p.Subtasks {
 		deps := "none"

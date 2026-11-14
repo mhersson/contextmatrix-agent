@@ -36,13 +36,12 @@ type RunRequest struct {
 
 // FanoutRequest is one harness.SpawnSubagents call plus what only Claude Code reads.
 type FanoutRequest struct {
-	Client    llm.LLM
-	Root      string
-	Emit      *events.Emitter
-	Specs     []harness.SubagentSpec
-	Opts      harness.SubagentOpts
-	OnDelta   func(llm.Delta) // Claude Code: liveness; the harness streams through Client
-	BudgetUSD float64         // Claude Code: each child's spend cap; 0 = none
+	Client  llm.LLM
+	Root    string
+	Emit    *events.Emitter
+	Specs   []harness.SubagentSpec
+	Opts    harness.SubagentOpts
+	OnDelta func(llm.Delta) // Claude Code: liveness; the harness streams through Client
 }
 
 // runScope is a run's tools root and the ledger it is charged to.
@@ -87,41 +86,10 @@ func (o *run) usageLimitHit() *UsageLimitError {
 	return o.usageLimit.Load()
 }
 
-// execRun refuses to start once a usage limit is recorded (both modes). In
-// Claude Code mode it also refuses on an exhausted ledger and caps the run at
-// the remaining budget: vendorkit reads a 0 cap as "no cap".
-func (o *run) execRun(ctx context.Context, ledger *Ledger, req RunRequest) (harness.Result, error) {
+// execRun refuses to start once a usage limit is recorded.
+func (o *run) execRun(ctx context.Context, req RunRequest) (harness.Result, error) {
 	if ule := o.usageLimitHit(); ule != nil {
 		return harness.Result{}, ule
-	}
-
-	if o.d.Cfg.ClaudeCode {
-		if ledger == nil {
-			ledger = o.ledger
-		}
-
-		// Each ledger is read once: a second read could see it exhausted and
-		// hand vendorkit a 0 cap, which it treats as "no cap".
-		remaining, capped := 0.0, false
-
-		for _, l := range []*Ledger{ledger, o.ledger} {
-			r, c := l.Remaining()
-			if !c {
-				continue
-			}
-
-			if r <= 0 {
-				return harness.Result{}, &BudgetExceededError{Spent: l.Spent(), Max: l.max}
-			}
-
-			if !capped || r < remaining {
-				remaining, capped = r, true
-			}
-		}
-
-		if req.Config.MaxCostUSD <= 0 {
-			req.Config.MaxCostUSD = remaining
-		}
 	}
 
 	res, err := o.d.Executor.Run(ctx, req)
@@ -130,40 +98,13 @@ func (o *run) execRun(ctx context.Context, ledger *Ledger, req RunRequest) (harn
 	return res, err
 }
 
-// bindingLedger is whichever of l and the run ledger has the least budget left:
-// the one execRun capped a Claude Code run at. l itself when neither is capped.
-func (o *run) bindingLedger(l *Ledger) *Ledger {
-	if l == nil {
-		l = o.ledger
-	}
-
-	least, capped := l.Remaining()
-	if r, c := o.ledger.Remaining(); c && (!capped || r < least) {
-		return o.ledger
-	}
-
-	return l
-}
-
-// execFanout refuses like execRun. Claude Code children run concurrently, so
-// each is capped at an equal share of the remaining budget.
+// execFanout refuses like execRun.
 func (o *run) execFanout(ctx context.Context, req FanoutRequest) ([]harness.SubagentResult, error) {
 	if ule := o.usageLimitHit(); ule != nil {
 		return nil, ule
 	}
 
 	if o.d.Cfg.ClaudeCode {
-		req.BudgetUSD = 0
-
-		// One read, as in execRun: a 0 share would be vendorkit's "no cap".
-		if remaining, capped := o.ledger.Remaining(); capped {
-			if remaining <= 0 {
-				return nil, &BudgetExceededError{Spent: o.ledger.Spent(), Max: o.ledger.max}
-			}
-
-			req.BudgetUSD = remaining / float64(max(len(req.Specs), 1))
-		}
-
 		if req.OnDelta == nil && o.progress != nil {
 			req.OnDelta = o.progress.onDelta
 		}

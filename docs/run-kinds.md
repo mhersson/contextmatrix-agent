@@ -302,6 +302,9 @@ ran the model. The fix and `forward_to` pass through as reported: ContextMatrix
 vets the fix and treats `card` without a fix, or a fix with another cause, as no
 fix.
 
+When the fix needs a design choice, the `## Sentinel` section decides and names
+it, with each rejected option; it never defers the choice to a maintainer.
+
 The limits, applied after masking (`limitInvestigate`, `limitFindings` and
 `fitOutcome`, `internal/runkind/limits.go` and `findings.go`). The finding rows
 apply to every kind that reports findings, `analyse` included:

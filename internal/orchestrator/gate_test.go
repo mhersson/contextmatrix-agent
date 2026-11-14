@@ -151,8 +151,8 @@ func TestGateClassificationLimitErrorParks(t *testing.T) {
 	}
 }
 
-// gateClaudeRun is a gate run on the Claude Code executor with a 1.00 ceiling
-// and 0.20 already spent, so a classification run is capped at 0.80.
+// gateClaudeRun is a gate run on the Claude Code executor whose ledger keeps a
+// 1.00 ceiling and 0.20 spent, so the max_cost guard can name it.
 func gateClaudeRun(ops *fakeOps, rec *recordingExec) *run {
 	inbox := &fakeInbox{msgs: []harness.UserMessage{{Content: "looks good"}}}
 	o := gateRun(ops, inbox, true, &planLLM{}, nil, 1.0, 0.2)
@@ -174,7 +174,7 @@ func TestGateClassificationStoppedAtTheBudgetCapParks(t *testing.T) {
 	assert.NotEqual(t, gateAdjust, outcome, "a truncated classification never becomes an adjust")
 }
 
-func TestGateClassificationDonePastTheCapIsApplied(t *testing.T) {
+func TestGateClassificationDoneIsApplied(t *testing.T) {
 	ops := &fakeOps{}
 	rec := &recordingExec{results: []execResult{{res: harness.Result{
 		Completed: true, Reason: "done", Output: `{"verdict":"approve"}`, TotalCostUSD: 0.9,
@@ -183,13 +183,8 @@ func TestGateClassificationDonePastTheCapIsApplied(t *testing.T) {
 
 	outcome, _, err := o.gate(t.Context(), gateReviewDecision, fixedGateModel("payload/model"), "findings?")
 	require.NoError(t, err)
-	assert.Equal(t, gateApprove, outcome, "an answer that crossed the cap is acted on as finished")
-	assert.InDelta(t, 1.1, o.ledger.Spent(), 1e-9, "the overspend is recorded")
-
-	_, err = o.execRun(t.Context(), o.ledger, RunRequest{Task: "next"})
-	_, ok := errors.AsType[*BudgetExceededError](err)
-	assert.True(t, ok, "the next run refuses on the exhausted ledger")
-	assert.Len(t, rec.runs, 1)
+	assert.Equal(t, gateApprove, outcome)
+	assert.InDelta(t, 1.1, o.ledger.Spent(), 1e-9, "the spend is recorded")
 }
 
 func TestGateEmitsAwaitingHuman(t *testing.T) {

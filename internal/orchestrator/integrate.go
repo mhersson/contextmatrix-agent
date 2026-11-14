@@ -169,6 +169,12 @@ func (o *run) writePRBody(ctx context.Context) (string, error) {
 	// cannot be omitted or softened by the model.
 	body = strings.TrimSpace(body)
 
+	// The planner's design choice is appended the same way, read from the card
+	// body so a resume entering at integrate keeps it.
+	if choice := designChoiceFromBody(o.body); choice != "" {
+		body += "\n\n## Design choice\n\n" + choice
+	}
+
 	return body + "\n\n---\n**Verification:** " + verifyStatusLine(o.lastVerify, o.resolvedVerifyPlan()) + "\n", nil
 }
 

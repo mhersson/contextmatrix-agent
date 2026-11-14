@@ -13,6 +13,7 @@ import (
 	"github.com/mhersson/contextmatrix-agent/internal/registry"
 	"github.com/mhersson/contextmatrix-harness/events"
 	"github.com/mhersson/contextmatrix-harness/harness"
+	"github.com/mhersson/contextmatrix-harness/llm"
 	"github.com/mhersson/contextmatrix-harness/tools"
 )
 
@@ -69,6 +70,7 @@ type planUnreachable struct {
 // index their own array) reference earlier entries only.
 type plan struct {
 	CardTier      string            `json:"card_tier"`
+	DesignChoice  string            `json:"design_choice,omitempty"`
 	Subtasks      []planSubtask     `json:"subtasks"`
 	FollowupCards []planFollowup    `json:"followup_cards"`
 	Unreachable   []planUnreachable `json:"unreachable_criteria"`
@@ -656,14 +658,16 @@ func isParkError(err error) bool {
 // for a bug-like card and returns a "## Diagnosis" text blob to ground the
 // plan. Budget-checked and usage-reported like every model-bearing step. The
 // caller treats a returned error as best-effort: planning proceeds without a
-// diagnosis rather than failing. model resolves lazily - the diagnose pass is
-// the first certain run of the plan decision model on non-creative bug cards.
-func (o *run) runDiagnose(ctx context.Context, model func(context.Context) string) (string, error) {
+// diagnosis rather than failing. A run stopped at its turn cap returns the
+// assistant text so far, marked incomplete, with capped true and a nil error.
+// model resolves lazily - the diagnose pass is the first certain run of the
+// plan decision model on non-creative bug cards.
+func (o *run) runDiagnose(ctx context.Context, model func(context.Context) string) (string, bool, error) {
 	d := o.d
 	cfg := d.Cfg
 
 	if err := o.ledger.Check(); err != nil {
-		return "", err
+		return "", false, err
 	}
 
 	task := fmt.Sprintf(diagnosePrompt, o.grounding, cfg.Workspace, readRootsBlock(d.ReadRoots),
@@ -676,10 +680,37 @@ func (o *run) runDiagnose(ctx context.Context, model func(context.Context) strin
 	o.spendAndReport(ctx, o.ledger, cfg.CardID, "plan: report diagnose usage failed", res, slug, "main", dur)
 
 	if err != nil {
-		return "", fmt.Errorf("diagnose run: %w", err)
+		if _, ok := errors.AsType[*MaxTurnsError](err); ok {
+			if text := assistantText(res.Messages); text != "" {
+				return incompleteDiagnosisNote + "\n\n" + text, true, nil
+			}
+		}
+
+		return "", false, fmt.Errorf("diagnose run: %w", err)
 	}
 
-	return strings.TrimSpace(res.Output), nil
+	return strings.TrimSpace(res.Output), false, nil
+}
+
+const incompleteDiagnosisNote = "(Incomplete: the investigation stopped at its turn cap before it concluded. " +
+	"Build on what it found and check what it leaves open; do not start over.)"
+
+// assistantText joins the non-empty assistant message contents with a blank
+// line: tool output, user and system messages and reasoning are left out.
+func assistantText(msgs []llm.Message) string {
+	var parts []string
+
+	for _, m := range msgs {
+		if m.Role != "assistant" {
+			continue
+		}
+
+		if c := strings.TrimSpace(m.Content); c != "" {
+			parts = append(parts, c)
+		}
+	}
+
+	return strings.Join(parts, "\n\n")
 }
 
 // draftPlan runs the read-only planner (initial attempt + at most one repair
@@ -1102,10 +1133,15 @@ func runPlan(ctx context.Context, o *run) error {
 	if isBugLike(o.tc) {
 		d.logCard(ctx, "running root-cause investigation (bug-like card)")
 
-		diag, derr := o.runDiagnose(ctx, decisionModel)
+		diag, capped, derr := o.runDiagnose(ctx, decisionModel)
 		switch {
 		case derr == nil:
 			diagnosis = diag
+
+			if capped {
+				d.logCard(ctx, "plan: diagnosis stopped at its turn cap; planning from its partial findings")
+			}
+
 			if strings.TrimSpace(diag) != "" {
 				// Record the root-cause investigation on the parent card body,
 				// like CM's systematic-debugging workflow skill writes ## Diagnosis.
@@ -1497,7 +1533,7 @@ func (o *run) createSubtasks(ctx context.Context, p plan) error {
 	// Record the plan on the parent card body so it carries the full history
 	// (the subtask cards hold the detail; this is the consolidated view, like
 	// CM's create-plan workflow skill writes ## Plan).
-	o.recordSection(ctx, "Plan", sectionFrom("Plan", formatPlan(o.subtasks)))
+	o.recordSection(ctx, "Plan", sectionFrom("Plan", formatPlan(p.DesignChoice, o.subtasks)))
 
 	// Refresh the prompt-facing snapshot now that plan-phase board mutations
 	// have landed on o.body: taskDescription stayed frozen at its newRun value

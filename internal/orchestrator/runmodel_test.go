@@ -389,7 +389,9 @@ func TestPlanTurnCap(t *testing.T) {
 		repair bool
 		want   int
 	}{
-		"first attempt caps at the plan cap":      {base: 45, repair: false, want: planMaxTurns},
+		"first attempt caps at the plan cap":      {base: 100, repair: false, want: 40},
+		"repair caps at 12":                       {base: 100, repair: true, want: 12},
+		"a base between the caps is kept":         {base: 30, repair: false, want: 30},
 		"repair caps tighter":                     {base: 45, repair: true, want: planRepairMaxTurns},
 		"a smaller configured base is not raised": {base: 8, repair: false, want: 8},
 		"a smaller base wins over the repair cap": {base: 8, repair: true, want: 8},
@@ -549,7 +551,7 @@ func TestDiagnoseConfigCarriesWrapUpNudge(t *testing.T) {
 	d.Cfg.MaxTurns = 8
 	o := newRun(t.Context(), d, ops.taskContext)
 
-	_, err := o.runDiagnose(context.Background(), fixedGateModel("default/model"))
+	_, _, err := o.runDiagnose(context.Background(), fixedGateModel("default/model"))
 	require.NoError(t, err)
 
 	joined := strings.Join(client.tasks, "\n")
@@ -567,7 +569,8 @@ func TestDiagnoseTurnCapNeverRaisesTheConfiguredBase(t *testing.T) {
 		want int
 	}{
 		"a smaller configured base is not raised": {base: 10, want: 10},
-		"a larger configured base is capped":      {base: 100, want: diagnoseMaxTurns},
+		"a larger configured base is capped":      {base: 100, want: 40},
+		"a base below the cap is kept":            {base: 30, want: 30},
 		"base equal to the cap is unchanged":      {base: diagnoseMaxTurns, want: diagnoseMaxTurns},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -624,7 +627,7 @@ func TestGuardedPhasesUnchanged(t *testing.T) {
 		assert.Contains(t, joined, planWrapUpMessage, "the plan still gets its own wrap-up nudge")
 
 		assert.Equal(t, planMaxTurns, planTurnCap(999, false),
-			"the plan's own cap is untouched and stays distinct from diagnoseMaxTurns")
+			"the plan's own cap is untouched and has its own constant")
 	})
 }
 

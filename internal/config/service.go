@@ -157,6 +157,7 @@ type ServiceConfig struct {
 	// CMX_MAX_CARD_COST. Zero disables the ceiling; the default (5.0) applies
 	// when the key is absent from config and env - koanf cannot distinguish
 	// absent-vs-zero, so an explicit 0 in YAML or env also disables the ceiling.
+	// claude_code runs do not enforce it.
 	MaxCardCost float64
 
 	// AdminPort is the admin listener that serves Prometheus /metrics. Zero

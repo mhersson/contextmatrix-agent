@@ -54,7 +54,7 @@ func TestFormatPlanReadable(t *testing.T) {
 		{ID: "X-2", Title: "Sysinfo pkg", Sizing: seedSizing("simple"), Body: "Create go.mod and a sysinfo package.\n\nFiles: go.mod, sysinfo/sysinfo.go"},
 		{ID: "X-3", Title: "HTTP server", Sizing: seedSizing("simple"), DependsOnIDs: []string{"X-2"}, Body: "Add main.go serving GET /."},
 	}
-	got := formatPlan(subs)
+	got := formatPlan("", subs)
 	assert.Contains(t, got, "### 1. X-2 - Sysinfo pkg")
 	assert.Contains(t, got, "_Bar: simple · Turns: base · Depends on: none_")
 	assert.Contains(t, got, "### 2. X-3 - HTTP server")
@@ -369,4 +369,42 @@ func TestRemoveSectionsWithPrefix(t *testing.T) {
 			assert.Empty(t, sectionsWithPrefix(got, "Copilot Review"), "nothing left for the reader")
 		})
 	}
+}
+
+func TestDesignChoiceRoundTrip(t *testing.T) {
+	subs := []subtaskRef{{ID: "X-2", Title: "Do it", Sizing: seedSizing("simple"), Body: "Files: a.go"}}
+
+	t.Run("empty choice leaves the plan unchanged", func(t *testing.T) {
+		got := formatPlan("  ", subs)
+		assert.Equal(t, formatPlan("", subs), got)
+		assert.NotContains(t, got, "Design choice")
+		assert.Empty(t, designChoiceFromBody("## Plan\n\n"+got))
+	})
+
+	t.Run("recorded choice reads back", func(t *testing.T) {
+		body := "intro\n\n## Plan\n\n" + formatPlan("Chose A over B: B is slower.", subs) + "\n\n## Review\n\nx"
+		assert.Equal(t, "Chose A over B: B is slower.", designChoiceFromBody(body))
+	})
+
+	t.Run("headings and fences in the choice do not end the block", func(t *testing.T) {
+		choice := "Chose A.\n### Rejected\nB because X\n```go\n### code\n```\n## Top\nend"
+		body := "## Plan\n\n" + formatPlan(choice, subs)
+		got := designChoiceFromBody(body)
+		assert.Contains(t, got, "B because X")
+		assert.Contains(t, got, "code")
+		assert.Contains(t, got, "end")
+		assert.Contains(t, got, "Chose A.")
+	})
+
+	t.Run("a subtask body holding the heading is not a choice", func(t *testing.T) {
+		leaky := []subtaskRef{{ID: "X-2", Title: "Do it", Sizing: seedSizing("simple"), Body: "### Design choice\n\nleaked"}}
+		assert.Empty(t, designChoiceFromBody("## Plan\n\n"+formatPlan("", leaky)))
+	})
+
+	t.Run("planned plan shows the choice", func(t *testing.T) {
+		p := plan{CardTier: "simple", DesignChoice: "Chose A.", Subtasks: []planSubtask{{Title: "T", Tier: "simple"}}}
+		assert.Contains(t, formatPlannedPlan(p), "Chose A.")
+		p.DesignChoice = ""
+		assert.NotContains(t, formatPlannedPlan(p), "Design choice")
+	})
 }

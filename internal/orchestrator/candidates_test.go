@@ -294,6 +294,19 @@ func TestFanoutDegradeLogged(t *testing.T) {
 	assert.True(t, ops.loggedContains("reduced to 1"), "the degrade is logged; logs=%v", ops.logs)
 }
 
+func TestFanoutClaudeCodeRunsTheConfiguredNPastReportedSpend(t *testing.T) {
+	ops := &fakeOps{}
+	mainGit := &fakeGit{}
+	d, _, _ := fanoutDeps(t, ops, mainGit, &planLLM{}, 3)
+	d.Cfg.ClaudeCode = true
+
+	o := newFanoutRun(t, d, []subtaskRef{{ID: "SUB-1", Title: "First", Sizing: seedSizing("simple")}}, 5)
+	o.tc.ReportedCostUSD = 12.6
+
+	require.NoError(t, o.runFanout(context.Background()))
+	assert.Len(t, o.candidates, 3, "no ceiling, so no degrade")
+}
+
 func TestFanoutAllFailed(t *testing.T) {
 	ops := &fakeOps{}
 	mainGit := &fakeGit{}

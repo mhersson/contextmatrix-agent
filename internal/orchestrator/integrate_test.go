@@ -625,3 +625,52 @@ func TestPRBodyPromptOmitsRecordedHistory(t *testing.T) {
 	assert.NotContains(t, llmFake.tasks[0], "naming could improve")
 	assert.NotContains(t, llmFake.tasks[0], "1. SUBTASK: Add the flag")
 }
+
+func TestIntegratePRBodyDesignChoice(t *testing.T) {
+	const choice = "Chose the cache over the queue: the queue adds a worker."
+
+	build := func(t *testing.T, mutate func(o *run)) string {
+		t.Helper()
+
+		pr := &fakePR{url: "https://example.test/pr/9"}
+		llmFake := &planLLM{responses: []llm.Response{stopResp("Model body", 0.01)}}
+		d := integrateTestDeps(&fakeOps{}, &fakeGit{remoteTip: "deadbeef"}, pr, llmFake)
+		o := newIntegrateRun(d, cmclient.TaskContext{Title: "T", Description: "body", CreatePR: true}, 0)
+		mutate(o)
+
+		require.NoError(t, runIntegrate(context.Background(), o))
+		require.Len(t, pr.calls, 1)
+
+		return pr.calls[0].body
+	}
+
+	subs := []subtaskRef{{ID: "S-1", Title: "Step", Sizing: seedSizing("simple")}}
+
+	t.Run("planned choice reaches the PR body before the trailer", func(t *testing.T) {
+		body := build(t, func(o *run) {
+			o.subtasks = subs
+			o.body = "## Plan\n\n" + formatPlan(choice, subs)
+		})
+
+		assert.Contains(t, body, choice)
+		assert.Less(t, strings.Index(body, "Model body"), strings.Index(body, choice))
+		assert.Less(t, strings.Index(body, choice), strings.Index(body, "**Verification:**"))
+	})
+
+	t.Run("resume entering at integrate keeps the choice", func(t *testing.T) {
+		body := build(t, func(o *run) {
+			o.body = "## Plan\n\n### Design choice\n\n" + choice + "\n\n### 1. S-1 - Step\n_Bar: simple_"
+		})
+
+		assert.Contains(t, body, choice)
+	})
+
+	t.Run("no choice leaves the body as today", func(t *testing.T) {
+		body := build(t, func(o *run) {
+			o.subtasks = subs
+			o.body = "## Plan\n\n" + formatPlan("", subs)
+		})
+
+		assert.True(t, strings.HasPrefix(body, "Model body\n\n---\n**Verification:** "), body)
+	})
+}
