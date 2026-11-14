@@ -204,3 +204,18 @@ func TestFitOutcomeDropsTrailingFindings(t *testing.T) {
 		assert.Equal(t, big, fitOutcome(big, 1024))
 	})
 }
+
+func TestLimitGuidanceAbsentFromRepo(t *testing.T) {
+	absent := make([]string, 70)
+	for i := range absent {
+		absent[i] = fmt.Sprintf("https://host%d.example.net", i)
+	}
+
+	absent[1] = strings.Repeat("é", 300)
+
+	got := limitGuidance(protocol.GuidancePRResult{Outcome: protocol.GuidanceRefused, AbsentFromRepo: absent})
+
+	require.Len(t, got.AbsentFromRepo, 64)
+	assert.LessOrEqual(t, len(got.AbsentFromRepo[1]), 512)
+	assert.Equal(t, protocol.GuidanceRefused, got.Outcome)
+}

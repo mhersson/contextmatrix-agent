@@ -111,6 +111,10 @@ expiry. The agent cannot narrow the token, so on a personal access token
 installation the run may carry the PAT's full scope. The run kinds give the
 model no tool that writes to git.
 
+`guidance_pr` writes git by code. Its token can push and open pull requests on
+its one repo and is used only by that code: the container runs no model, so no
+tool can reach it. The worker's push guard allows one ref, the guidance branch.
+
 A model kind gets its LLM access as a card run does: a stand-in token
 for serve's LLM proxy, or the subscription token for a `claude_code` endpoint.
 A kind without a model registers nothing with the proxy and stages no LLM values
@@ -158,10 +162,11 @@ cause, a model kind's usage rows, and on `done` the result. Before it is
 written, the result is masked with the secrets the worker holds (the git token,
 the LLM key and the subscription token), then bounded to the size limits below,
 then fitted to the outcome limit (`fitOutcome`, `internal/runkind/limits.go`).
-A result other than a check's can reach git, so it is masked as well with each
-operator value of 8 bytes or more: the env vars named by `CM_OPERATOR_ENV_NAMES`
-(`resultMask`, `internal/runkind/runkind.go`). A check's result is repo text and
-keeps exact matching.
+A model kind's result can reach git, so it is masked as well with each operator
+value of 8 bytes or more: the env vars named by `CM_OPERATOR_ENV_NAMES`
+(`resultMask`, `internal/runkind/runkind.go`). The results of `check` (repo text)
+and `guidance_pr` (a PR URL and a path ContextMatrix matches exactly) keep exact
+matching, with the provisioned secrets only.
 A run that cannot read its env or files, build its model executor, clone, or
 decode its input ends with cause `error` and no result. Any cause but `done`
 exits non-zero.
@@ -348,6 +353,66 @@ model can correct them. A run that ends without the call ends with cause
 `error`, and the stop causes and usage rows are investigate's. The findings are
 masked and bounded by the finding limits in the table under Investigate.
 
+## Guidance PR
+
+`guidance_pr` appends ContextMatrix-vetted guidance to the project's block in
+the repo's instruction file and opens or updates a pull request
+(`guidancePR`, `internal/runkind/guidance.go`). It runs no model and takes no
+card; its workspace is `<workspace>/guidance_pr`. Its input is a
+`protocol.GuidancePRInput`: `section`, `title`, `body`, `allowed` and
+`expect_head`.
+
+The branch is `cm/sentinel/<project>` (`protocol.GuidanceBranchPrefix`), the
+only ref the run may push: the worker's push guard is set to it before any
+push, and a force push is allowed only inside `cm/`, never to the base or the
+remote default. The run never merges, closes or labels a PR.
+
+The run goes in this order, and stops at the first step that ends it:
+
+1. `section`, `title` and `body` are masked with the provisioned secrets and the
+   operator's worker env values of 8 bytes or more.
+2. It reads the branch's remote tip, then the open PR whose head is the branch.
+3. Stale: `expect_head` is set and there is no open PR, or the PR's head or the
+   tip differs from it; or `expect_head` is empty and a PR is open. The outcome
+   is `stale` and nothing is written.
+4. The text check runs on the base clone, as for `check`, with the candidate
+   verify commands as the declared ones. Entries in `allowed` (compared
+   exactly) pass; any other entry the repo lacks gives `refused` with them in
+   `absent_from_repo`, cut and truncated as the check's.
+5. The file is the one grounding reads: root `AGENTS.md`, else root `CLAUDE.md`,
+   else a new `AGENTS.md`. When that name is a symlink it is followed if the
+   target is a regular file inside the repo, outside `.git`, with no symlink on
+   its path; the target is then the file written, committed and reported
+   (`AGENTS.md` linking to `docs/AGENTS.md` reports `docs/AGENTS.md`, and the
+   link stays). A link that escapes the repo, is missing, is chained or points
+   to a directory, or a root name that is a directory, ends the run with cause
+   `error`.
+6. The new text is the base branch's file with `section` appended to the
+   project's block (`<!-- sentinel:<project>:start -->` to `:end -->`, headed
+   `## Sentinel guidance`), or a new block. Merged and human-edited guidance on
+   the base stays as it is. Unbalanced or repeated markers end the run with
+   cause `error`.
+7. With `expect_head` the branch is cut from that commit, fetched from the
+   remote; the instruction file must resolve to the same path there as on the
+   base, else the run ends with cause `error` before writing. Without it, the
+   branch is cut from the base branch.
+8. Only the file is committed, with `title` as the message. When nothing
+   changed (possible only with `expect_head`) the PR's title and body are
+   updated and the outcome is `unchanged`.
+9. The push: with `expect_head` a plain push on top of it; without it a plain
+   push when the branch is new, else a force push leased on the tip read in
+   step 2, which replaces a closed PR's branch. A failed push is `stale` when
+   the remote tip is no longer the one the push expected, otherwise cause
+   `error`.
+10. The PR is created against the base branch when none is open, else its title
+    and body are updated. The outcome is `pushed` with the PR URL, the new tip
+    and the file.
+
+The result is masked with the provisioned secrets only, so the PR URL stays
+exact; the input (`section`, `title`, `body`) gets the operator values too.
+`absent_from_repo` is bounded. A failed
+run has no result.
+
 ## Spend
 
 A model run kind has no MCP key, so it cannot report usage to the card.
@@ -396,6 +461,9 @@ rows never reach the card's budget.
 | `internal/runkind/analyse.go`            | The analyse kind: its inputs and findings                             |
 | `internal/runkind/analyse_tool.go`       | The `report_analysis` tool: decoding and checking the findings        |
 | `internal/runkind/analyse_prompt.go`     | The analysis's task prompt                                            |
+| `internal/runkind/guidance.go`           | The guidance_pr kind: staleness, text check, file, commit, push, PR   |
+| `internal/runkind/guidance_file.go`      | The instruction file: the grounding choice and following a symlink    |
+| `internal/runkind/guidance_block.go`     | The project's guidance block: markers, the appended text              |
 | `internal/runkind/spend.go`              | The metered client and the usage rows                                 |
 | `internal/runkind/limits.go`             | The result size limits and the outcome fit                            |
 | `internal/runkind/findings.go`           | A finding's schema, check, limit and mask, shared by the kinds        |

@@ -46,6 +46,11 @@ func limitResult(r protocol.RunKindResult) protocol.RunKindResult {
 		r.Analyse = &a
 	}
 
+	if r.GuidancePR != nil {
+		g := limitGuidance(*r.GuidancePR)
+		r.GuidancePR = &g
+	}
+
 	return r
 }
 
@@ -67,13 +72,24 @@ func limitCheck(r protocol.CheckResult) protocol.CheckResult {
 
 	r.Candidates = cands
 
-	if len(r.AbsentFromRepo) > maxAbsent {
-		r.AbsentFromRepo = r.AbsentFromRepo[:maxAbsent]
-	}
-
-	r.AbsentFromRepo = mapStrings(r.AbsentFromRepo, func(s string) string { return truncate(s, maxAbsentBytes) })
+	r.AbsentFromRepo = limitAbsent(r.AbsentFromRepo)
 
 	return r
+}
+
+// limitGuidance bounds the absent entries as limitCheck does.
+func limitGuidance(r protocol.GuidancePRResult) protocol.GuidancePRResult {
+	r.AbsentFromRepo = limitAbsent(r.AbsentFromRepo)
+
+	return r
+}
+
+func limitAbsent(absent []string) []string {
+	if len(absent) > maxAbsent {
+		absent = absent[:maxAbsent]
+	}
+
+	return mapStrings(absent, func(s string) string { return truncate(s, maxAbsentBytes) })
 }
 
 // limitInvestigate truncates the diagnosis, drops a fix whose section or

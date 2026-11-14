@@ -62,6 +62,7 @@ func Run(ctx context.Context, spec Spec, client llm.LLM, emit *events.Emitter) r
 		model: func() (modelDeps, error) {
 			return newModelDeps(spec, client, red.Apply)
 		},
+		guidance: func(ws string) guidanceDeps { return newGuidanceDeps(spec, ws) },
 	})
 }
 
@@ -69,28 +70,39 @@ func Run(ctx context.Context, spec Spec, client llm.LLM, emit *events.Emitter) r
 // would mangle ordinary text.
 const minOperatorValueBytes = 8
 
-// resultMask masks the provisioned secrets in a check's result, which is repo
-// text, and also the operator values in any other kind's: a model's result can
-// reach git as cards, guidance, a park entry or a card section.
-func resultMask(spec Spec) func(string) string {
+// operatorMask masks the provisioned secrets and each operator value of 8
+// bytes or more: what a run writes to git or to a card.
+func operatorMask(spec Spec) func(string) string {
 	secrets := []string{spec.GitToken, spec.LLMKey, spec.LLMOAuthToken}
 
-	if spec.Kind != protocol.RunKindCheck {
-		for _, v := range spec.OperatorValues {
-			if len(v) >= minOperatorValueBytes {
-				secrets = append(secrets, v)
-			}
+	for _, v := range spec.OperatorValues {
+		if len(v) >= minOperatorValueBytes {
+			secrets = append(secrets, v)
 		}
 	}
 
 	return redact.New(secrets).Apply
 }
 
+// resultMask masks a result. The results of check and guidance_pr are repo
+// text and identifiers (a PR URL, a path) that ContextMatrix matches exactly,
+// so they get the provisioned secrets only; any other kind's result can reach
+// git as cards, a park entry or a card section, so it gets the operator values
+// too.
+func resultMask(spec Spec) func(string) string {
+	if spec.Kind == protocol.RunKindCheck || spec.Kind == protocol.RunKindGuidancePR {
+		return redact.New([]string{spec.GitToken, spec.LLMKey, spec.LLMOAuthToken}).Apply
+	}
+
+	return operatorMask(spec)
+}
+
 // deps are the kinds' effects, one field per kind. A kind whose effects can
 // fail to build gets a constructor, called only when that kind runs.
 type deps struct {
-	check checkDeps
-	model func() (modelDeps, error)
+	check    checkDeps
+	model    func() (modelDeps, error)
+	guidance func(ws string) guidanceDeps
 }
 
 // workspaceDir is the run's clone directory: the card's, or the kind's for a
@@ -173,6 +185,18 @@ func runKind(ctx context.Context, spec Spec, ws string, emit *events.Emitter, d 
 		}
 
 		return protocol.RunKindResult{Analyse: &r}, usage, nil
+	case protocol.RunKindGuidancePR:
+		var in protocol.GuidancePRInput
+		if err := json.Unmarshal(spec.Input, &in); err != nil {
+			return protocol.RunKindResult{}, nil, fmt.Errorf("decode guidance_pr input: %w", err)
+		}
+
+		r, err := guidancePR(ctx, ws, spec, in, d.guidance(ws))
+		if err != nil {
+			return protocol.RunKindResult{}, nil, err
+		}
+
+		return protocol.RunKindResult{GuidancePR: &r}, nil, nil
 	default:
 		return protocol.RunKindResult{}, nil, fmt.Errorf("unknown run kind %q", spec.Kind)
 	}
@@ -236,6 +260,13 @@ func maskResult(r protocol.RunKindResult, mask func(string) string) protocol.Run
 		a := *r.Analyse
 		a.Findings = maskFindings(a.Findings, mask)
 		r.Analyse = &a
+	}
+
+	if r.GuidancePR != nil {
+		g := *r.GuidancePR
+		g.Outcome, g.PRURL, g.HeadSHA, g.File = mask(g.Outcome), mask(g.PRURL), mask(g.HeadSHA), mask(g.File)
+		g.AbsentFromRepo = mapStrings(g.AbsentFromRepo, mask)
+		r.GuidancePR = &g
 	}
 
 	return r
