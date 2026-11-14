@@ -65,5 +65,5 @@ func guidanceLine(branch string) string {
 		return "The remote has no guidance branch for this project."
 	}
 
-	return fmt.Sprintf("The project's pending guidance is on the branch fetched as origin/%s: read it\nwith git show or git diff against HEAD, and do not repeat it.", branch)
+	return fmt.Sprintf("Guidance already proposed for this project, pending or rejected by a human,\nis on the branch fetched as origin/%s: read it with git show or git diff\nagainst HEAD, and do not repeat it.", branch)
 }
