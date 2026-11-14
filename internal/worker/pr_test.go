@@ -1262,7 +1262,7 @@ func TestOpenPRForHeadArgs(t *testing.T) {
 	t.Parallel()
 
 	assert.Equal(t,
-		[]string{"pr", "list", "--head", "cm/sentinel/alpha", "--state", "open", "--json", "url,headRefOid"},
+		[]string{"pr", "list", "--head", "cm/sentinel/alpha", "--state", "open", "--json", "url,headRefOid,isCrossRepository"},
 		openPRForHeadArgs("cm/sentinel/alpha"))
 }
 
@@ -1280,6 +1280,19 @@ func TestParseOpenPRs(t *testing.T) {
 	assert.Equal(t, "abc", sha)
 
 	_, _, err = parseOpenPRs(`[{"url":"a","headRefOid":"1"},{"url":"b","headRefOid":"2"}]`)
+	require.Error(t, err)
+
+	url, sha, err = parseOpenPRs(`[{"url":"fork","headRefOid":"9","isCrossRepository":true}]`)
+	require.NoError(t, err)
+	assert.Empty(t, url)
+	assert.Empty(t, sha)
+
+	url, sha, err = parseOpenPRs(`[{"url":"fork","headRefOid":"9","isCrossRepository":true},{"url":"own","headRefOid":"1","isCrossRepository":false}]`)
+	require.NoError(t, err)
+	assert.Equal(t, "own", url)
+	assert.Equal(t, "1", sha)
+
+	_, _, err = parseOpenPRs(`[{"url":"a","headRefOid":"1","isCrossRepository":false},{"url":"b","headRefOid":"2"}]`)
 	require.Error(t, err)
 
 	_, _, err = parseOpenPRs("not json")

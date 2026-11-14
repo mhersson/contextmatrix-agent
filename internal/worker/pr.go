@@ -287,22 +287,35 @@ func (p *PRCreator) Create(ctx context.Context, title, body, base, head string) 
 	return url, nil
 }
 
-// openPRForHeadArgs lists the open PRs whose head is the given branch.
+// openPRForHeadArgs lists the open PRs whose head branch has the given name;
+// isCrossRepository lets the parser drop fork PRs.
 func openPRForHeadArgs(head string) []string {
-	return []string{"pr", "list", "--head", head, "--state", "open", "--json", "url,headRefOid"}
+	return []string{"pr", "list", "--head", head, "--state", "open", "--json", "url,headRefOid,isCrossRepository"}
 }
 
-// parseOpenPRs reads gh pr list output for one head branch: no PR gives empty
-// values, one gives its URL and head commit, several are ambiguous and an error.
+// parseOpenPRs reads gh pr list output for one head branch, ignoring fork PRs:
+// no PR gives empty values, one gives its URL and head commit, several are
+// ambiguous and an error.
 func parseOpenPRs(out string) (url, headSHA string, err error) {
 	var prs []struct {
-		URL        string `json:"url"`
-		HeadRefOid string `json:"headRefOid"`
+		URL               string `json:"url"`
+		HeadRefOid        string `json:"headRefOid"`
+		IsCrossRepository bool   `json:"isCrossRepository"`
 	}
 
 	if err := json.Unmarshal([]byte(out), &prs); err != nil {
 		return "", "", fmt.Errorf("parse gh pr list output: %w", err)
 	}
+
+	own := prs[:0]
+
+	for _, pr := range prs {
+		if !pr.IsCrossRepository {
+			own = append(own, pr)
+		}
+	}
+
+	prs = own
 
 	switch len(prs) {
 	case 0:

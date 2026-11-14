@@ -373,7 +373,7 @@ The run goes in this order, and stops at the first step that ends it:
 
 1. `section`, `title` and `body` are masked with the provisioned secrets and the
    operator's worker env values of 8 bytes or more.
-2. It reads the branch's remote tip, then the open PR whose head is the branch.
+2. It reads the branch's remote tip, then the open PR whose head is the branch, ignoring pull requests from forks.
 3. Stale: `expect_head` is set and there is no open PR, or the PR's head or the
    tip differs from it; or `expect_head` is empty and a PR is open. The outcome
    is `stale` and nothing is written.
