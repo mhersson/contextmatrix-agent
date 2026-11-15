@@ -27,7 +27,12 @@ const findingKindsText = `- guidance: lines for the project's AGENTS.md or CLAUD
 - hard_card: a note that this card is hard.
 - ecosystem: a bug in ContextMatrix or the agent, or its generic prompts, as
   an issue: a title and a body. Documented, intentional behaviour of the agent
-  or ContextMatrix is not a bug.
+  or ContextMatrix is not a bug. The issue is public: describe the bug in
+  generic terms, what ContextMatrix or the agent did and what it should have
+  done, and name ContextMatrix in full. Its title, text and evidence hold no
+  secret or environment value, project name, card ID or prefix, user name,
+  repository name, owner or URL other than ContextMatrix's own, host name,
+  path in the project's repository, text quoted from the card, or log line.
 Evidence summarises what in the run shows the friction and names no card IDs.
 `
 

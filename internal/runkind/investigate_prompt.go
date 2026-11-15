@@ -39,6 +39,7 @@ one cause:
   worker image.
 - ecosystem: a bug in ContextMatrix or the agent, or its generic prompts.
   Documented, intentional behaviour of the agent or ContextMatrix is not a bug.
+  Report the bug as an ecosystem finding as well; only findings become issues.
 
 Only with cause card, propose a fix. It can hold only these fields:
 - section: the content of a "## Sentinel" body section, without its heading
