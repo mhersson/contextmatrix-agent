@@ -3,6 +3,7 @@ package mob
 import (
 	"context"
 	"iter"
+	"slices"
 	"strings"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
@@ -88,19 +89,17 @@ func messageText(m *a2a.Message) string {
 }
 
 // rebuildHistory reconstructs the seat's prior conversation as role-tagged
-// turns. a2a-go v2.3.1 stored-task semantics (verified against the module
-// source) force three corrections over a naive History walk:
+// turns from a2a-go's stored task:
 //
 //   - the incoming round message is appended to History BEFORE Execute runs,
 //     so the entry matching currentID must be dropped (it is the prompt, not
 //     history);
-//   - the seat's most recent utterance is parked in Status.Message and moves
-//     into History only on the NEXT status update, so it must be appended;
-//   - each earlier utterance was history-appended after the round message
-//     that followed it, so raw History interleaves out of chronological
-//     order. The turn protocol is strictly alternating (one moderator
-//     message, one utterance, repeat), so re-interleaving by role restores
-//     chronology.
+//   - the seat's most recent utterance is parked in Status.Message. a2a-go
+//     v2.8+ copies it into History ahead of the next message, so it is
+//     appended only when History lacks its ID;
+//   - the turn protocol is strictly alternating (one moderator message, one
+//     utterance, repeat), so re-interleaving by role keeps the turns
+//     chronological whichever order History holds them in.
 func rebuildHistory(t *a2a.Task, currentID string) []Turn {
 	if t == nil {
 		return nil
@@ -122,7 +121,7 @@ func rebuildHistory(t *a2a.Task, currentID string) []Turn {
 		}
 	}
 
-	if sm := t.Status.Message; sm != nil && sm.Role == a2a.MessageRoleAgent && sm.ID != currentID {
+	if sm := t.Status.Message; sm != nil && sm.Role == a2a.MessageRoleAgent && sm.ID != currentID && !inHistory(t, sm.ID) {
 		agents = append(agents, Turn{Role: "assistant", Content: messageText(sm)})
 	}
 
@@ -139,4 +138,11 @@ func rebuildHistory(t *a2a.Task, currentID string) []Turn {
 	}
 
 	return turns
+}
+
+// inHistory reports whether t.History holds a message with the given ID.
+func inHistory(t *a2a.Task, id string) bool {
+	return id != "" && slices.ContainsFunc(t.History, func(m *a2a.Message) bool {
+		return m != nil && m.ID == id
+	})
 }

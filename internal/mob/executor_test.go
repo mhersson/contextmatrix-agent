@@ -168,6 +168,27 @@ func TestSeatExecutorRebuildsHistoryAcrossTurns(t *testing.T) {
 	assert.Equal(t, "round-2 body", calls[2].prompt)
 }
 
+func TestRebuildHistoryAppendsParkedUtteranceOnce(t *testing.T) {
+	round0 := &a2a.Message{ID: "u0", Role: a2a.MessageRoleUser, Parts: a2a.ContentParts{a2a.NewTextPart("round-0")}}
+	utter1 := &a2a.Message{ID: "a1", Role: a2a.MessageRoleAgent, Parts: a2a.ContentParts{a2a.NewTextPart("utterance-1")}}
+	round1 := &a2a.Message{ID: "u1", Role: a2a.MessageRoleUser, Parts: a2a.ContentParts{a2a.NewTextPart("round-1")}}
+	want := []Turn{{Role: "user", Content: "round-0"}, {Role: "assistant", Content: "utterance-1"}}
+
+	tests := []struct {
+		name    string
+		history []*a2a.Message
+	}{
+		{name: "parked only in Status.Message", history: []*a2a.Message{round0, round1}},
+		{name: "already copied into History", history: []*a2a.Message{round0, utter1, round1}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			task := &a2a.Task{History: tc.history, Status: a2a.TaskStatus{Message: utter1}}
+			assert.Equal(t, want, rebuildHistory(task, "u1"))
+		})
+	}
+}
+
 func TestSeatExecutorCloseCompletesWithoutRunning(t *testing.T) {
 	runner := &scriptedRunner{reply: func(int) (string, float64, error) { return "utterance-1", 0, nil }}
 	client := startSeatServer(t, SeatConfig{Name: "seat-1"}, runner.runner())
